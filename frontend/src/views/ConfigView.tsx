@@ -9,7 +9,7 @@ import {
   dig, collectConfig, formatRules,
 } from '../configSchema';
 import { Field, Switch, type FieldSpec } from './configWidgets';
-import { btnPrimary, btnGhost } from '../components/buttons';
+import { btnPrimary, btnGhost, btnXsPrimary } from '../components/buttons';
 
 const SECTIONS = [
   { id: 'sec-svc', name: '服务与网络', sub: '端口 · 鉴权 · 超时 · 代理' },
@@ -45,6 +45,7 @@ export function ConfigView() {
   const [taskActions, setTaskActions] = useState<{ code: string; desc?: string; enabled: boolean; mp?: boolean }[]>([]);
   /* 逐任务参数覆盖的只读预览（手工编辑 config.json；见表单提示）。 */
   const [growthTasks, setGrowthTasks] = useState('');
+  const [showAdvancedTasks, setShowAdvancedTasks] = useState(false);
   const formRef = useRef<HTMLFormElement>(null);
 
   /* catalog 匹配（与 Go 侧 config.MatchPath 同语义）。 */
@@ -306,49 +307,85 @@ export function ConfigView() {
             <div className="rounded-lg border border-[var(--line-soft)] bg-[var(--surface-2)] p-3.5">
               <div className="text-[12.5px] font-semibold text-[var(--ink-2)]">成长任务自动化（任务中心 / 一键完成）</div>
               <div className="mt-1.5 text-[11.5px] leading-relaxed text-[var(--ink-3)]">
-                控制哪些成长/活动任务参与自动扫描与执行。判据事件形状是内置实现（代码），这里只能选择启用集合、顺序与参数；全部留空 = 既有行为（内置动作全启用）。
+                控制成长任务的自动执行策略与未内置任务的兜底行为。
               </div>
-              <div className="mt-2.5">
-                <Grid cols={2}>
-                  {fld({ name: 'growth_autotasks_disabled', label: '屏蔽的任务码（黑名单）', placeholder: '如 skill_1, black_cat', hint: '逗号分隔；同时命中白名单时以黑名单为准' })}
-                  {fld({ name: 'growth_autotasks_only', label: '仅启用这些任务码（白名单）', placeholder: '留空 = 不启用白名单', hint: '非空时只有列出的任务参与自动化' })}
-                  {fld({ name: 'growth_autotasks_order', label: '执行顺序覆盖', placeholder: '如 chat_5, first_buddy', hint: '列出的按本序在前（用于依赖前置）；未列出的按内置依赖序排后' })}
-                  {fld({ name: 'growth_autotasks_mp_codes', label: '小程序口径任务码', placeholder: '如 +New_MP_Task', hint: '裸码 = 覆盖内置表；+ 前缀 = 追加；运行时差集探测到的码自动并入' })}
-                </Grid>
-              </div>
+
+              {/* 全局兜底领奖开关 */}
               <div className="mt-2.5">
                 {sw('growth_autotasks_allow_unknown_claim', '未内置判据的任务只做「接受 + 达标领奖」')}
                 <div className="mt-1.5 text-[11.5px] leading-relaxed text-[var(--ink-3)]">
                   打开后，上游已下发但尚无判据实现的任务不会被忽略：进度达标时自动领奖（绝不伪造事件）；未达标不排队。默认关闭。
                 </div>
               </div>
-              {taskActions.length > 0 && (
-                <div className="mt-3 flex flex-col gap-1.5">
-                  <div className="text-[11.5px] text-[var(--ink-3)]">内置动作码（共 {taskActions.length} 个，灰显 = 当前被策略屏蔽或不在白名单）：</div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {taskActions.map((a) => (
-                      <span
-                        key={a.code}
-                        title={a.desc || ''}
-                        className={
-                          'rounded px-1.5 py-0.5 font-[family-name:var(--mono)] text-[11px] ' +
-                          (a.enabled ? 'bg-[var(--accent-soft)] text-[var(--accent)]' : 'bg-[var(--surface)] text-[var(--ink-3)] line-through opacity-70')
-                        }
-                      >
-                        {a.code}{a.mp ? ' · mp' : ''}
-                      </span>
-                    ))}
+
+              {/* 可视化规则管理引导卡片 */}
+              <div className="mt-3.5 flex flex-wrap items-center justify-between gap-2.5 rounded-lg border border-[var(--accent)]/20 bg-[var(--accent-soft)]/20 p-3 text-[12px]">
+                <div>
+                  <div className="font-medium text-[var(--ink)]">活动自动化规则已升级为全景可视化管理</div>
+                  <div className="mt-0.5 text-[11.5px] text-[var(--ink-3)]">
+                    各任务的启停开关、小程序口径、动作模板（通用对话/模型打卡）与参数已统一收口至任务中心，无需在此手动输入任务码。
                   </div>
                 </div>
-              )}
-              <div className="mt-3 text-[11.5px] leading-relaxed text-[var(--ink-3)]">
-                逐任务参数覆盖与动作模板已支持在「任务中心 → 活动自动化配置」可视化编辑；此处展示当前 <code>growth.autotasks.tasks</code> 快照，保存全局配置时原样保留。
+                <button
+                  type="button"
+                  className={btnXsPrimary}
+                  onClick={() => {
+                    window.location.hash = 'taskscenter';
+                  }}
+                >
+                  前往任务中心配置规则 →
+                </button>
               </div>
-              {growthTasks && (
-                <pre className="mt-1.5 max-h-[160px] overflow-auto whitespace-pre-wrap rounded bg-[var(--surface)] p-2.5 font-[family-name:var(--mono)] text-[11.5px] leading-relaxed">
-                  {growthTasks}
-                </pre>
-              )}
+
+              {/* 折叠区：底层名单文本（高级选项） */}
+              <div className="mt-3 border-t border-[var(--line-soft)] pt-2.5">
+                <button
+                  type="button"
+                  className="flex items-center gap-1.5 text-[11.5px] text-[var(--ink-3)] hover:text-[var(--ink)] transition-colors cursor-pointer"
+                  onClick={() => setShowAdvancedTasks(!showAdvancedTasks)}
+                >
+                  <span>{showAdvancedTasks ? '收起底层名单文本（高级选项）' : '展开底层名单文本（高级选项，一般无需手动填写）'}</span>
+                  <span className="text-[10px]">{showAdvancedTasks ? '▲' : '▼'}</span>
+                </button>
+
+                {showAdvancedTasks && (
+                  <div className="mt-3 space-y-3">
+                    <Grid cols={2}>
+                      {fld({ name: 'growth_autotasks_disabled', label: '屏蔽的任务码（黑名单）', placeholder: '如 skill_1, black_cat', hint: '逗号分隔；同时命中白名单时以黑名单为准' })}
+                      {fld({ name: 'growth_autotasks_only', label: '仅启用这些任务码（白名单）', placeholder: '留空 = 不启用白名单', hint: '非空时只有列出的任务参与自动化' })}
+                      {fld({ name: 'growth_autotasks_order', label: '执行顺序覆盖', placeholder: '如 chat_5, first_buddy', hint: '列出的按本序在前（用于依赖前置）；未列出的按内置依赖序排后' })}
+                      {fld({ name: 'growth_autotasks_mp_codes', label: '小程序口径任务码', placeholder: '如 +New_MP_Task', hint: '裸码 = 覆盖内置表；+ 前缀 = 追加；运行时差集探测到的码自动并入' })}
+                    </Grid>
+                    {taskActions.length > 0 && (
+                      <div className="mt-2 flex flex-col gap-1.5">
+                        <div className="text-[11.5px] text-[var(--ink-3)]">内置动作码（共 {taskActions.length} 个，灰显 = 当前被策略屏蔽或不在白名单）：</div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {taskActions.map((a) => (
+                            <span
+                              key={a.code}
+                              title={a.desc || ''}
+                              className={
+                                'rounded px-1.5 py-0.5 font-[family-name:var(--mono)] text-[11px] ' +
+                                (a.enabled ? 'bg-[var(--accent-soft)] text-[var(--accent)]' : 'bg-[var(--surface)] text-[var(--ink-3)] line-through opacity-70')
+                              }
+                            >
+                              {a.code}{a.mp ? ' · mp' : ''}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {growthTasks && (
+                      <div className="mt-2">
+                        <div className="text-[11px] text-[var(--ink-3)]">当前 growth.autotasks.tasks 快照（保存全局配置时原样保留）：</div>
+                        <pre className="mt-1 max-h-[140px] overflow-auto whitespace-pre-wrap rounded bg-[var(--surface)] p-2 font-[family-name:var(--mono)] text-[11px] leading-relaxed">
+                          {growthTasks}
+                        </pre>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         )}
