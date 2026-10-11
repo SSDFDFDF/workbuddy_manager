@@ -3,13 +3,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, setApiKey } from '../api';
 import { toast } from '../toast';
 import { useData } from '../data';
-import type { CatalogField, PromptPresetInfo, PromptPreviewResponse, VersionInfo } from '../types';
+import type { CatalogField, PromptPresetInfo, PromptPreviewResponse, VersionInfo, BuiltinScrubRule, BuiltinScrubResponse } from '../types';
 import {
   CFG_MAP, DURATION_FIELDS, DURATION_RE, DURATION_TIP,
   dig, collectConfig, formatRules,
 } from '../configSchema';
 import { Field, Switch, type FieldSpec } from './configWidgets';
 import { btnPrimary, btnGhost, btnXsPrimary } from '../components/buttons';
+import { Dialog } from '../components/Dialog';
+import { Tag } from '../components/ui';
 
 const SECTIONS = [
   { id: 'sec-svc', name: '服务与网络', sub: '端口 · 鉴权 · 超时 · 代理' },
@@ -29,6 +31,65 @@ function SubHead({ children }: { children: React.ReactNode }) {
   return <div className="mt-1 mb-0.5 text-[12.5px] font-semibold text-[var(--ink-2)]">{children}</div>;
 }
 
+/* 内置指纹表模态框：后端下发的只读静态表（编译期常量，不可关闭）。 */
+function BuiltinRulesDialog({ onClose }: { onClose: () => void }) {
+  const [rules, setRules] = useState<BuiltinScrubRule[] | null>(null);
+  const [err, setErr] = useState('');
+  useEffect(() => {
+    let alive = true;
+    api<BuiltinScrubResponse>('scrub/builtin')
+      .then((d) => alive && setRules(d.rules || []))
+      .catch((e) => alive && setErr(e?.message || '加载失败'));
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const n = rules?.length ?? 0;
+  return (
+    <Dialog
+      title="内置指纹表"
+      hint={`网关内置的逐字改写规则（编译期常量，启用后恒生效、不可关闭）。自定义规则在其上叠加。${n ? ` 共 ${n} 条。` : ''}`}
+      onClose={onClose}
+      width={720}
+    >
+      {err && <div className="text-[12.5px] text-[var(--bad)]">{err}</div>}
+      {!err && !rules && <div className="text-[12.5px] text-[var(--ink-3)]">加载中…</div>}
+      {rules && (
+        <table className="w-full border-collapse text-[12px]">
+          <thead>
+            <tr className="border-b border-[var(--line-soft)] text-left text-[11.5px] text-[var(--ink-2)]">
+              <th className="px-2 py-1.5 font-medium whitespace-nowrap">类型</th>
+              <th className="px-2 py-1.5 font-medium">匹配</th>
+              <th className="px-2 py-1.5 font-medium">改写为</th>
+              <th className="px-2 py-1.5 font-medium">说明</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-[var(--line-soft)]/60 align-top">
+            {rules.map((r, i) => (
+              <tr key={i}>
+                <td className="px-2 py-1.5 whitespace-nowrap">
+                  <Tag tone={r.kind === 'literal' ? 'ok' : 'warn'}>{r.kind === 'literal' ? '逐字' : '模式'}</Tag>
+                </td>
+                <td className="px-2 py-1.5">
+                  <code className="break-all text-[11.5px] text-[var(--ink)]">{r.match}</code>
+                </td>
+                <td className="px-2 py-1.5">
+                  {r.replace ? (
+                    <code className="break-all text-[11.5px] text-[var(--ink)]">{r.replace}</code>
+                  ) : (
+                    <Tag tone="bad">整段删除</Tag>
+                  )}
+                </td>
+                <td className="px-2 py-1.5 text-[11.5px] text-[var(--ink-3)]">{r.note || '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Dialog>
+  );
+}
+
 export function ConfigView() {
   const { refresh } = useData();
   const [values, setValues] = useState<Record<string, string | boolean>>({});
@@ -46,6 +107,7 @@ export function ConfigView() {
   /* 逐任务参数覆盖的只读预览（手工编辑 config.json；见表单提示）。 */
   const [growthTasks, setGrowthTasks] = useState('');
   const [showAdvancedTasks, setShowAdvancedTasks] = useState(false);
+  const [showBuiltinRules, setShowBuiltinRules] = useState(false);
   const formRef = useRef<HTMLFormElement>(null);
 
   /* catalog 匹配（与 Go 侧 config.MatchPath 同语义）。 */
@@ -635,6 +697,12 @@ export function ConfigView() {
             <div className="text-[11.5px] leading-relaxed text-[var(--ink-3)]">
               上游按逐字拒绝的已知串（Claude Code / Codex 身份句等）藏在 user/assistant/tool 消息里时只能靠本项逐字改写。会修改用户可见内容，只用于绕过上游字面拒绝；开关与规则即时生效。
             </div>
+            <div>
+              <button type="button" className={btnXsPrimary} onClick={() => setShowBuiltinRules(true)}>
+                查看内置指纹表
+              </button>
+              <span className="ml-2 text-[11.5px] text-[var(--ink-3)]">启用即含内置表（不可单独关闭），自定义规则在其上叠加。</span>
+            </div>
             <div className="flex items-center gap-2 text-[12.5px] font-medium text-[var(--ink-2)]">
               自定义规则
               <span className="text-[11.5px] font-normal text-[var(--ink-3)]">
@@ -667,6 +735,9 @@ export function ConfigView() {
             </div>
           </div>
         )}
+
+        {/* 内置指纹表模态框 */}
+        {showBuiltinRules && <BuiltinRulesDialog onClose={() => setShowBuiltinRules(false)} />}
 
         {/* 保存条 */}
         <div className="sticky bottom-4 flex items-center gap-2.5 rounded-xl border border-[var(--line)] bg-[var(--raise)] px-4 py-3 shadow-lg">

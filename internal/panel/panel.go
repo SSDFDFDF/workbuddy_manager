@@ -31,6 +31,7 @@ import (
 	"workbuddy_manager/internal/proxy"
 	"workbuddy_manager/internal/reqlog"
 	"workbuddy_manager/internal/scheduler"
+	"workbuddy_manager/internal/scrub"
 	"workbuddy_manager/internal/upstream"
 	"workbuddy_manager/internal/usage"
 )
@@ -304,6 +305,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/usage", p.withAuth(p.usage))
 	p.mux.HandleFunc("POST /panel/api/usage/save", p.withAuth(p.usageSave))
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.withAuth(p.modelProbes))
+	p.mux.HandleFunc("GET /panel/api/scrub/builtin", p.withAuth(p.scrubBuiltin))
 	// 配置域接口（配置文件读写 + 提示词草稿预览）整体由 internal/config 提供，
 	// 面板只负责挂载与鉴权：配置的字段语义、热生效范围、重启项清单都归配置域，
 	// 面板不再复制一份。
@@ -586,6 +588,12 @@ func (p *Panel) modelProbes(w http.ResponseWriter, r *http.Request) {
 		out["updated_at"] = fi.ModTime().Format(time.RFC3339)
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// scrubBuiltin 下发内置指纹表（只读静态表，供面板模态框展示）。
+// 内置表是编译期常量、不可关闭；自定义规则在其上叠加（见 fingerprint_rules）。
+func (p *Panel) scrubBuiltin(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"rules": scrub.BuiltinRules()})
 }
 
 // ---------------------------------------------------------------------------

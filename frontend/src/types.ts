@@ -343,3 +343,15 @@ export interface VersionInfo {
   builtin_global_client?: string;
   builtin_global_cli?: string;
 }
+
+/* 内置指纹表（只读静态表，/panel/api/scrub/builtin 下发）。 */
+export interface BuiltinScrubRule {
+  kind: 'literal' | 'pattern';
+  match: string;
+  replace?: string;
+  note?: string;
+}
+
+export interface BuiltinScrubResponse {
+  rules?: BuiltinScrubRule[];
+}

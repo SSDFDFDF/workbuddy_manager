@@ -32,6 +32,8 @@ func TestFingerprintsNeutralized(t *testing.T) {
 		{"header-title-case", "X-Anthropic-Billing-Header: cc_version=9;", "Billing-Header", ""},
 		{"cc-kv", "...; cc_version=2.0; cc_entrypoint=cli;", "cc_version", ""},
 		{"codex", codexInstr, "running in the Codex CLI,", "running in the Codex CLI tool,"},
+		{"codex-identity-gpt5", "You are Codex, a coding agent based on GPT-5.", "You are Codex,", "You are the Codex assistant,"},
+		{"codex-identity-openai", "You are Codex, an OpenAI general-purpose agentic assistant.", "You are Codex,", "You are the Codex assistant,"},
 		{"feedback", ccFeedback, ccFeedback, "To provide feedback"},
 		{"error-code", "upstream returned code=11128 for this request", "11128", "11-128"},
 		{"error-code-bare", "错误码 11128", "11128", "11-128"},
@@ -74,7 +76,7 @@ func TestCleanInputUnchanged(t *testing.T) {
 // 这条守护"请求体级预检"的正确性——预检漏判会让整层对某些请求静默失效。
 func TestSentinelIsSuperset(t *testing.T) {
 	for _, in := range []string{ccIdentity, ccBranch, ccHeader, "x-anthropic-billing-header",
-		codexInstr, ccFeedback, "code=11128", "cc_version=1.0;", "X-Anthropic-Billing-Header"} {
+		codexInstr, "You are Codex, a coding agent based on GPT-5.", ccFeedback, "code=11128", "cc_version=1.0;", "X-Anthropic-Billing-Header"} {
 		body, _ := json.Marshal(map[string]any{"messages": []any{map[string]any{"content": in}}})
 		if Text(in) != in && !Sentinel(body) {
 			t.Errorf("Text 改动了但 Sentinel 漏判: %q", in)

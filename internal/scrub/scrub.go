@@ -51,6 +51,12 @@ var literals = []string{
 	// #5 Codex 身份句（三句模板的首句）→ 一词替换
 	"You are a coding agent running in the Codex CLI, a terminal-based coding assistant.",
 	"You are a coding agent running in the Codex CLI tool, a terminal-based coding assistant.",
+	// #5b Codex 备用身份句：本地核对 Codex v0.153.4 二进制发现多个以
+	// "You are Codex," 开头的变体（"...a coding agent based on GPT-5" /
+	// "...an OpenAI general-purpose agentic assistant" / "...an agent based on GPT-5"）。
+	// 只对共同前缀做一词插入，一条覆盖全部变体；替换串不含匹配串。
+	"You are Codex,",
+	"You are the Codex assistant,",
 	// #6 反馈句（需整句同现）→ 一词替换
 	"To give feedback, users should report the issue at https://github.com/anthropics/claude-code/issues",
 	"To provide feedback, users should report the issue at https://github.com/anthropics/claude-code/issues",
@@ -65,6 +71,63 @@ var literals = []string{
 
 // literalReplacer 上表字面串的单遍改写器（trie，无命中时返回原串不分配）。
 var literalReplacer = strings.NewReplacer(literals...)
+
+// literalNotes 与 literals 的 match→replace 对一一对应（面板展示用说明）。
+var literalNotes = []string{
+	"#3 Claude Code 身份句（official CLI → CLI tool）",
+	"#4 PR 分支注入句（Main branch → Default branch）",
+	"#5 Codex 身份句（Codex CLI → Codex CLI tool）",
+	"#5b Codex 备用身份句（You are Codex, → You are the Codex assistant,）",
+	"#6 反馈 issue 句（give → provide feedback）",
+	"#7 反探测错误码 11128（上游见到裸串即整单拦截）",
+}
+
+// BuiltinRule 一条内置指纹规则的只读描述（面板展示用）。
+type BuiltinRule struct {
+	Kind    string `json:"kind"`              // literal（逐字替换）/ pattern（变长模式）
+	Match   string `json:"match"`             // 匹配串或模式描述
+	Replace string `json:"replace,omitempty"` // 替换文本；空串表示整段删除
+	Note    string `json:"note,omitempty"`    // 说明
+}
+
+// BuiltinRules 返回内置指纹表的结构化描述（供面板模态框展示）。
+//
+// literal 部分直接从 literals 派生，不会与改写逻辑漂移（有测试守护长度一致）；
+// pattern 部分描述 stripKeyValues 处理的两类变长/大小写不敏感模式。
+func BuiltinRules() []BuiltinRule {
+	out := make([]BuiltinRule, 0, len(literals)/2+3)
+	for i := 0; i+1 < len(literals); i += 2 {
+		note := ""
+		if j := i / 2; j < len(literalNotes) {
+			note = literalNotes[j]
+		}
+		out = append(out, BuiltinRule{
+			Kind:    "literal",
+			Match:   literals[i],
+			Replace: literals[i+1],
+			Note:    note,
+		})
+	}
+	out = append(out,
+		BuiltinRule{
+			Kind:  "pattern",
+			Match: headerName + ":<值>[;]",
+			Note:  "#1 图灵/计费 header 键值段整段删除（大小写不敏感）",
+		},
+		BuiltinRule{
+			Kind:    "pattern",
+			Match:   headerName + "（裸键名）",
+			Replace: headerShort,
+			Note:    "#1 残留裸键名缩写为 " + headerShort,
+		},
+		BuiltinRule{
+			Kind:  "pattern",
+			Match: ccPrefix + "<name>=<值>[;]",
+			Note:  "#2 尾随 cc_ 键值段整段删除（词边界 + 大小写不敏感）",
+		},
+	)
+	return out
+}
 
 const (
 	// headerName 图灵/计费 header 键名（上游只看键名不看值）。
@@ -84,12 +147,14 @@ const (
 //	#2 cc_ 键值                          → "cc_"
 //	#4 Main branch (                     → "Main branch ("
 //	#5 Codex CLI                         → "Codex CLI"
+//	#5b You are Codex,                    → "You are Codex,"
 //	#7 11128                             → "11128"
 var sentinels = [][]byte{
 	[]byte("nthropic"), []byte("NTHROPIC"), // 大小写不敏感的 "anthropic"
 	[]byte(ccPrefix),
 	[]byte("Main branch ("),
 	[]byte("Codex CLI"),
+	[]byte("You are Codex,"),
 	[]byte("11128"),
 }
 
@@ -129,6 +194,7 @@ func hasSentinel(s string) bool {
 		strings.Contains(s, ccPrefix) ||
 		strings.Contains(s, "Main branch (") ||
 		strings.Contains(s, "Codex CLI") ||
+		strings.Contains(s, "You are Codex,") ||
 		strings.Contains(s, "11128")
 }
 
