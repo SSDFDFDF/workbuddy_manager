@@ -622,13 +622,24 @@ func (ms *markupStream) expand(obj map[string]any) []map[string]any {
 			frames = append(frames, ms.callFrame(p.idx, st.maxToolIdx+1+j, call))
 		}
 	}
+	var lastFinish map[string]any
 	for i := range pieces {
 		p := &pieces[i]
 		if fr, ok := takenFinish[p.idx]; ok {
 			if fr == "stop" && ms.choice(p.idx).restored > 0 {
 				fr = "tool_calls"
 			}
-			frames = append(frames, ms.finishFrame(p.idx, fr))
+			lastFinish = ms.finishFrame(p.idx, fr)
+			frames = append(frames, lastFinish)
+		}
+	}
+	// usage 帧位：上游惯例是 usage 挂在收尾帧。拆帧后原帧（正文帧）仍带着它，
+	// 而「只读 [DONE] 前最后一帧」的客户端会丢。搬到本帧拆出的最后一个收尾帧上
+	//（聚合路径无感：s.add 无论哪帧都并入）；无收尾帧（finish 在后续帧）时不动。
+	if lastFinish != nil {
+		if u, ok := obj["usage"]; ok {
+			delete(obj, "usage")
+			lastFinish["usage"] = u
 		}
 	}
 	return frames

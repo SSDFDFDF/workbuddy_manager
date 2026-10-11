@@ -125,3 +125,32 @@ func TestBridgeMarkupRepairTruncatedFinish(t *testing.T) {
 		}
 	})
 }
+
+// Anthropic 流式桥接：还原后的调用进 tool_use 块（stop_reason=tool_use），
+// 标记文本不落 text_delta 事件。
+func TestBridgeMarkupRepairAnthropicStream(t *testing.T) {
+	b, _ := os.ReadFile("../upstream/testdata/leaked_markup.txt")
+	fix := string(b)
+	esc := strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "\n", "\\n").Replace(fix)
+	sse := `data: {"id":"x","model":"m","choices":[{"index":0,"delta":{"content":"` + esc + `"}}]}` + "\n\n" +
+		`data: {"id":"x","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}` + "\n\ndata: [DONE]\n\n"
+	req, _ := Decode(Anthropic, []byte(`{"model":"m","max_tokens":16,"messages":[{"role":"user","content":"go"}]}`))
+	w := httptest.NewRecorder()
+	repair := upstream.NewMarkupRepair(nil, true)
+	if err := Stream(w, strings.NewReader(sse), req, nil, upstream.WithMarkupRepair(repair)); err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	out := w.Body.String()
+	if strings.Contains(out, "DSML") {
+		t.Fatalf("markup leaked into anthropic stream")
+	}
+	if !strings.Contains(out, "tool_use") || !strings.Contains(out, "exec_command") {
+		t.Fatalf("no tool_use block:\n%s", out)
+	}
+	// text_delta 事件里不应有任何标记文本
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "text_delta") && strings.Contains(line, "DSML") {
+			t.Fatalf("markup inside text_delta: %s", line)
+		}
+	}
+}

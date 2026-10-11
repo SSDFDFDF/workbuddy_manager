@@ -458,3 +458,70 @@ func TestMarkupTailFramesAfterFinishRewrite(t *testing.T) {
 		t.Fatalf("want two call frames:\n%s", out)
 	}
 }
+
+// TestMarkupUsageFramePosition usage 帧位：上游惯例 usage 挂在收尾帧。拆帧后
+// 「只读 [DONE] 前最后一帧」的客户端不能丢 usage——content 与 finish 同帧且同帧
+// 产出还原调用时（takenFinish 拆帧路径），usage 必须搬到收尾帧上。
+func TestMarkupUsageFramePosition(t *testing.T) {
+	block := "<" + markupPipe + "DSML" + markupPipe + " calls><" + markupPipe + "DSML" + markupPipe + " invoke name=\"exec_command\"></" + markupPipe + "DSML" + markupPipe + " invoke></" + markupPipe + "DSML" + markupPipe + " calls>"
+	payload := map[string]any{
+		"id": "x", "model": "m",
+		"usage": map[string]any{"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+		"choices": []any{map[string]any{
+			"index": 0, "finish_reason": "stop",
+			"delta": map[string]any{"content": "正文" + block},
+		}},
+	}
+	raw, _ := json.Marshal(payload)
+	sse := "data: " + string(raw) + "\n\ndata: [DONE]\n\n"
+	w := httptest.NewRecorder()
+	repair := NewMarkupRepair(nil, true)
+	if err := StreamHint(w, strings.NewReader(sse), nil, WithMarkupRepair(repair)); err != nil {
+		t.Fatal(err)
+	}
+	type frame struct {
+		Choices []struct {
+			Delta struct {
+				Content   string `json:"content"`
+				ToolCalls []any  `json:"tool_calls"`
+			} `json:"delta"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+		Usage *json.RawMessage `json:"usage"`
+	}
+	usageFrames, finishFrames, textFrames := 0, 0, 0
+	var usageOnFinish bool
+	for _, line := range strings.Split(w.Body.String(), "\n") {
+		if !strings.HasPrefix(line, "data: ") || line == "data: [DONE]" {
+			continue
+		}
+		var f frame
+		if json.Unmarshal([]byte(line[6:]), &f) != nil {
+			continue
+		}
+		if len(f.Choices) > 0 && len(f.Choices[0].Delta.ToolCalls) > 0 {
+			if f.Usage != nil {
+				t.Fatalf("call frame must not carry usage: %s", line)
+			}
+		}
+		if len(f.Choices) > 0 && f.Choices[0].Delta.Content != "" {
+			textFrames++
+			if f.Usage != nil {
+				t.Fatalf("text frame must not carry usage after the move: %s", line)
+			}
+		}
+		if len(f.Choices) > 0 && f.Choices[0].FinishReason != "" {
+			finishFrames++
+			if f.Usage != nil {
+				usageFrames++
+				usageOnFinish = true
+			}
+		}
+	}
+	if repair.Converted() != 1 || textFrames != 1 || finishFrames != 1 {
+		t.Fatalf("frame layout wrong: converted=%d text=%d finish=%d", repair.Converted(), textFrames, finishFrames)
+	}
+	if !usageOnFinish || usageFrames != 1 {
+		t.Fatalf("usage must ride exactly once on the finish frame:\n%s", w.Body.String())
+	}
+}
