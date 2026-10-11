@@ -569,6 +569,13 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 	}
 	peek := request.Chat
 	out.request = request
+	// 标记还原（internal/upstream/dsml.go）的工具名名单：客户端声明过哪些工具。
+	// 名单来自「本请求声明的 tools」与「会话历史里出现过的工具名」两个来源
+	//（tools 声明在中转环节丢失是泄漏常态，只认前者会让还原层在最需要它的场景
+	// 下失效）；取自已解析文档（跨协议入口是翻译后的 Chat 形态，与本层同源），
+	// 在提示词/档位改写之前读——那些改写不动 tools / messages[].tool_calls 子树。
+	// 名单为空时还原层走弱判定（块结构完美 + 工具名形如标识符）。
+	markupAllow := upstream.ToolNameAllowlistDoc(peek.Object)
 	// 非流式响应在本地聚合后一次性写出：加写 deadline，防客户端保持连接却不读
 	// 时长期占住 handler／响应内存／账号租约（SSE 已有逐帧 deadline，不重复包装）。
 	if !peek.Stream {
@@ -1167,9 +1174,14 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 			// 组装请求上下文做判定）。
 			// errFrame：上游 error 帧原文（观察者旁路采集），用于流尾的账号处置。
 			var errFrame string
+			// 标记还原：上游在没有 tools 的请求里会把工具调用吐成原生标记文本，
+			// 这里在透传前还原成 delta.tool_calls（见 internal/upstream/dsml.go）。
+			// 每次 attempt 新建还原器（状态机按流持有，轮转重试不跨流）；弱判定
+			// 常开——tools 声明缺失恰是泄漏的常态，名单为空也由块结构把关。
+			repair := upstream.NewMarkupRepair(markupAllow, true)
 			sErr := out.Stream(w, rc, upstream.FrameHintFunc(func() upstream.HintContext {
 				return h.hintContext(bareModel, reqHasImage)
-			}), upstream.WithErrorFrameObserver(func(payload string) { errFrame = payload }), upstream.WithExpectedChoices(peek.N), upstream.WithFrameObserver(stats.Observe), upstream.WithResponseTimeouts(timeouts.FirstModelEvent, timeouts.FirstGeneration, timeouts.Tail))
+			}), upstream.WithErrorFrameObserver(func(payload string) { errFrame = payload }), upstream.WithExpectedChoices(peek.N), upstream.WithFrameObserver(stats.Observe), upstream.WithResponseTimeouts(timeouts.FirstModelEvent, timeouts.FirstGeneration, timeouts.Tail), upstream.WithMarkupRepair(repair))
 			switch {
 			case upstream.IsEmptyStreamError(sErr):
 				// 上游 200 但空流（0 有效帧）：StreamHint 已写 error 帧 + [DONE]
@@ -1227,6 +1239,17 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 					}
 				}
 			}
+			// 标记还原观测（§15 显式可见）：命中写入归档改写列（面板可见）+ 日志一行
+			// 便于统计发生率；识别到却没还原（判定不通过）单独 WARN，排障时能区分
+			//「没识别到」与「识别到但拒绝」。
+			if n := repair.Converted(); n > 0 {
+				st.noteRewrite(fmt.Sprintf("tool_calls.markup:leaked→%dcall(s)", n))
+				log.Printf("INFO: [server] stream acct=%s model=%s: repaired %d native tool call(s) from assistant text (tool names known=%d)",
+					logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, n, len(markupAllow))
+			} else if m := repair.Seen(); m > 0 {
+				log.Printf("WARN: [server] stream acct=%s model=%s: saw %d native tool call block(s) but repaired none (tool names known=%d)",
+					logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, m, len(markupAllow))
+			}
 			credit, hasCredit := stats.Credit()
 			if hit, miss, ok := stats.CacheTokens(); ok {
 				st.cacheHit, st.cacheMiss, st.hasCache = hit, miss, true
@@ -1257,7 +1280,9 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 		}
 		observed := &chatStatsReader{start: st.start}
 		timeouts := h.cfg.Upstream.StreamTimeoutsNow()
-		completion, err := out.Aggregate(rc, upstream.WithExpectedChoices(peek.N), upstream.WithFrameObserver(observed.Observe), upstream.WithResponseTimeouts(timeouts.FirstModelEvent, timeouts.FirstGeneration, timeouts.Tail))
+		// 标记还原（非流式）：同流式，每次 attempt 新建还原器，弱判定常开。
+		repair := upstream.NewMarkupRepair(markupAllow, true)
+		completion, err := out.Aggregate(rc, upstream.WithExpectedChoices(peek.N), upstream.WithFrameObserver(observed.Observe), upstream.WithResponseTimeouts(timeouts.FirstModelEvent, timeouts.FirstGeneration, timeouts.Tail), upstream.WithMarkupRepair(repair))
 		rc.Close()
 		var formatted map[string]any
 		if err == nil {
@@ -1280,6 +1305,15 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 			return
 		}
 		resp := completion.Raw
+		// 标记还原观测（非流式，与流式同口径）：命中写归档改写列 + 日志一行。
+		if n := repair.Converted(); n > 0 {
+			st.noteRewrite(fmt.Sprintf("tool_calls.markup:leaked→%dcall(s)", n))
+			log.Printf("INFO: [server] non-stream acct=%s model=%s: repaired %d native tool call(s) from assistant text (tool names known=%d)",
+				logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, n, len(markupAllow))
+		} else if m := repair.Seen(); m > 0 {
+			log.Printf("WARN: [server] non-stream acct=%s model=%s: saw %d native tool call block(s) but repaired none (tool names known=%d)",
+				logfmt.Label(acct.UID, acct.NicknameValue()), bareModel, m, len(markupAllow))
+		}
 		credit, total, hasCredit := usageCreditTotal(resp)
 		if usage, ok := resp["usage"].(map[string]any); ok {
 			if hit, okH := upstream.UsageCacheHitTokens(usage); okH {

@@ -82,6 +82,7 @@ type chatStat struct {
 	dropped []string
 	// 网关主动改写的生成参数（key:原值→出站值）。与 dropped 分开：语义不同
 	//（执行了 vs 没执行），且不能被客户端遥测字段占满的 dropped 上限挤掉。
+	// 当前两类：越界 reasoning effort 归一；模型原生工具调用标记还原（dsml.go）。
 	rewritten []string
 
 	logged bool
@@ -90,8 +91,8 @@ type chatStat struct {
 // maxDroppedFields 归档事件保留的“被忽略字段”上限（推理历史等逐项路径会很多）。
 const maxDroppedFields = 8
 
-// maxRewrittenFields 归档事件保留的“改写”上限。改写只会是「越界档位归一」这类
-// 少数几条（幂等且去重），上限只用于防病态客户端。
+// maxRewrittenFields 归档事件保留的“改写”上限。改写是「越界档位归一」「标记还原」
+// 这类少数几条（幂等且去重），上限只用于防病态客户端。
 const maxRewrittenFields = 4
 
 // noteRewrite 记录一次主动改写（key:原值→出站值）：去重 + 限长。

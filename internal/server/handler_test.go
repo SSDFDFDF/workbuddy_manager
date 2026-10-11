@@ -2132,3 +2132,65 @@ func TestChatStickyClaudeCodeUserIDSession(t *testing.T) {
 		t.Fatalf("plain user_id must not create binding, binds=%v", st.binds)
 	}
 }
+
+// TestChatMarkupRepairRecorded DSML 标记还原端到端跑通 handler 链路：
+// 上游在无 tools 请求里把工具调用吐成原生标记文本，handler 还原成 tool_calls，
+// 并把还原计数写进 reqlog 归档的改写列（§15 显式可见）。流式与非流式都覆盖。
+func TestChatMarkupRepairRecorded(t *testing.T) {
+	// 真实泄漏正文（取自 upstream 回归夹具）嵌进一帧 content。
+	leaked, err := os.ReadFile("../upstream/testdata/leaked_markup.txt")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	esc, _ := json.Marshal(string(leaked))
+	leakSSE := `data: {"id":"c","object":"chat.completion.chunk","created":1,"model":"glm-5.2","choices":[{"index":0,"delta":{"role":"assistant","content":` + string(esc) + `}}]}` + "\n\n" +
+		`data: {"id":"c","object":"chat.completion.chunk","created":1,"model":"glm-5.2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}` + "\n\ndata: [DONE]\n\n"
+
+	for _, stream := range []bool{false, true} {
+		name := "nonstream"
+		if stream {
+			name = "stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			up := newFakeUpstream(t, func(string) (int, string, bool) { return 200, leakSSE, true })
+			rec := reqlog.New(reqlog.Config{})
+			h := NewHandler(Config{
+				Pool:       testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
+				Upstream:   up,
+				RequestLog: rec,
+			})
+			body := `{"model":"glm-5.2","messages":[{"role":"user","content":"go"}]}`
+			if stream {
+				body = `{"model":"glm-5.2","stream":true,"messages":[{"role":"user","content":"go"}]}`
+			}
+			req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			if w.Code != 200 {
+				t.Fatalf("code=%d body=%s", w.Code, w.Body)
+			}
+			out := w.Body.String()
+			if strings.Contains(out, "DSML") {
+				t.Fatalf("markup leaked to client:\n%s", out)
+			}
+			if !strings.Contains(out, "exec_command") {
+				t.Fatalf("tool call not restored:\n%s", out)
+			}
+			// 还原计入 reqlog 改写列（面板 LogsView 据此展示）。
+			snap := rec.Snapshot()
+			if len(snap.Recent) == 0 {
+				t.Fatal("no request recorded")
+			}
+			e := snap.Recent[len(snap.Recent)-1]
+			found := false
+			for _, rw := range e.Rewritten {
+				if strings.HasPrefix(rw, "tool_calls.markup:") {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("markup repair not recorded in rewritten: %v", e.Rewritten)
+			}
+		})
+	}
+}

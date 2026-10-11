@@ -29,6 +29,7 @@
 | 14 | **面板版本配置** | 占位符来自后端内置基线（不硬编码）；「一键填入已拉取版本」；CLI 版本需人工核对 | 生效 |
 | 15 | **Responses / Anthropic 桥接** | `/v1/responses` 无状态文本 / function tools；`/v1/messages` 文本 / client tools。复用原有执行、重试、用量与日志；原生 Chat 保留扩展。纯提示/遥测字段、不支持的工具声明与客户端侧推理状态接受即丢（写入请求归档并在面板展示）；近似变换显式可见（`is_error` → `[tool error]` 前缀、`stop_sequences` → Chat `stop`）；会改变语义或伪造能力的字段（`previous_response_id` / `conversation` / `background:true` / `strict:true` / 白名单外未知字段）仍明确 400。见 [兼容说明](docs/PROTOCOL_COMPATIBILITY.md) | 生效（限定子集） |
 | 16 | **模型目录门禁（显式刷新制）** | 出站前先查模型目录快照：快照可用而模型不存在 → 直接 `404 model_not_found`，不选号、不打上游；命中时顺带重排候选域与纠正大小写。快照为空 → fail-open。快照只在启动预热与面板「模型能力」页手动刷新时写入；客户端请求路径零上游探测 | 生效 |
+| 17 | **原生工具调用标记还原（DSML→tool_calls）** | 上游（DeepSeek 系）在请求**未声明 tools** 时把工具调用吐成全角竖线原生标记文本落进 `content`；本层在响应出站前识别并还原成结构化 `tool_calls`。流式与非流式共用同一帧管线（`consume` 内展开）。判定分两级：名单非空走严格比对，名单为空（tools 丢失常态）走弱判定（块完美闭合 + 工具名形如标识符）。硬前提：本 choice 无结构化 tool_calls（真实调用一律优先让位）、块内不夹带正文；拿不准一律原文回吐，**绝不吞字节**。属 §15 式**显式可见近似变换**：命中写入归档 `rewritten` 列（面板展示）+ 日志一行，非静默改写 | 生效（限 Chat/Responses/Messages 出站路径） |
 
 ---
 
@@ -65,6 +66,11 @@
 
 跨协议兼容不引入模型名猜测式补丁：不按模型名增删参数、不搬移 system、不改写 Schema、不伪造 reasoning / 工具结果、不将截断转为成功。
 
+> 例外：原生工具调用标记还原（§1 表第 17 条、dsml.go）不是「伪造工具结果」：它只把**模型自己发出的**
+> 原生标记语法还原成结构化 `tool_calls`，不凭空造内容、不改请求参数。它是§15 式显式可见的近似
+> 变换（归档 `rewritten` 可见 + 日志），配合生产真实泄漏正文夹具（testdata/leaked_markup.txt）与回归测试
+> 满足「厂商直连补丁须提供真实上游脉敏请求 / 原始帧依据」的门槛。「绝不吞字节」为硬线：拿不准一律原文透出。
+
 厂商直连补丁不等于 WorkBuddy 能力；采用补丁须提供真实上游脱敏请求 / 原始帧依据与回归测试。
 
 ---
@@ -88,6 +94,7 @@
 | 裸模型名默认域 | `internal/server/resolve_model.go` |
 | 请求归档 / 被丢弃字段 | `internal/reqlog/reqlog.go`（`Event.dropped`）、`internal/server/logging.go`；面板 `frontend/src/views/LogsView.tsx` |
 | 模型目录门禁 | **新增** `internal/upstream/catalog.go`、`internal/server/modelcheck.go`；`internal/server/handler.go`、`internal/panel/panel.go`、`cmd/server/main.go` |
+| 原生工具调用标记还原 | **新增** `internal/upstream/dsml.go`（还原内核 + `markupStream` 帧展开 + `WithMarkupRepair` / `ToolNameAllowlist*`）；`internal/upstream/sse.go`（`consume` 内按 `o.markup` 展开帧，流式/非流式/整包快照三路径共用）；`internal/server/handler.go`（名单提取 + 挂载还原器 + `noteRewrite` 观测）；归档复用 `reqlog.Event.rewritten` + 面板 `LogsView.tsx`（无前端改动，复用改写展示通道） |
 | 面板 | 源码 `frontend/src/`（React + Vite）；构建产物 `internal/panel/web/`（`go:embed`）；后端 `internal/panel/{config.go,panel.go,web_embed.go}` |
 | 成长任务自动化策略 | `internal/config/{schema,normalize,catalog}.go`、`internal/panel/autotask_policy.go`（**新增**）、`internal/panel/{autotask,taskcenter,tasks}.go`、`internal/upstream/blackcat.go`（`InWindow`）、`internal/scheduler/{scheduler.go,blackcat.go}`、`cmd/server/main.go`、面板表单项（`frontend/src/{configSchema.ts,views/ConfigView.tsx}`） |
 
@@ -131,6 +138,7 @@ image part 与工具名不改（改写会破坏数据或契约）。
 | 日期 | 并入范围 | 内容 |
 | --- | --- | --- |
 | 2026-10-08 | `e05edb7..d66384d`（5 个实质提交） | 企业版账号能力门控 + 企业额度分流（`get-enterprise-user-usage`）；暂停选号单列统计；到期提醒按到期时间排序；图表 tooltip 归位 `<g>`；夜猫子门控测试时钟钉住；版本号 `1.13.0-panel`。已同时移植上游 5 个测试文件与 2 个前端用例 |
+| 2026-10-11 | 上游 `7595a0a`（能力吸收，非整提交合入） | **原生工具调用标记还原（DSML→tool_calls）**：先在 fork 上用上游生产夹具复现「未声明 tools 时标记泄漏成正文」，确认是 fork 真实能力缺口；按 fork 自身 `StreamOption`/`ConsumeCompletion` 重写还原层（非移植上游 handler 接线），流式/非流式/整包快照共用 `consume` 内帧展开；落地姿态从上游「静默改写」换成 §15 式「显式可见」（归档 `rewritten` + 日志）。上游同批的 `8391a05`（面板按需拉取）不合入：改的是 fork 不存在的 `internal/panel/app.js`，且诉求已被 fork 的 `ExpiryCard` 缓存方案覆盖 |
 
 > 同步方式：fork 与上游无共同祖先，采用「按文件取上游版本 + 手工 port」，不用 rebase / cherry-pick。
 > 更早的基线 `e05edb7` 为 fork 首次记录差异时的比对点；其后上游提交均已按上表并入。

@@ -782,10 +782,14 @@ func ErrorStatus(k ErrKind) int {
 	}
 }
 
+// StreamOption 是响应管线的可选行为开关。WithErrorFrameObserver / WithFrameObserver
+// 只做旁路观测、不改透传字节；WithMarkupRepair 会改写出站帧——把正文里的原生工具
+// 调用标记还原成 tool_calls（§15 式显式可见的近似变换，见 dsml.go）。
 type StreamOption func(*streamOptions)
 type streamOptions struct {
 	onErrorFrame        func(string)
 	onFrame             func(map[string]any)
+	markup              *markupStream
 	expected            int
 	firstEvent          time.Duration
 	firstGeneration     time.Duration
@@ -939,24 +943,49 @@ func consume(r io.Reader, s *completionState, emit func(sseEvent, map[string]any
 		if obj["object"] != "chat.completion" {
 			return fmt.Errorf("unsupported upstream JSON response")
 		}
-		if err = s.add(obj); err != nil {
-			return err
+		// 标记还原展开（见 dsml.go）：整包快照同样可能把工具调用吐成标记文本。
+		// 展开出的调用帧 / 收尾帧是 delta 形态，与原快照帧同走 s.add 校验。
+		frames := o.markup.expand(obj)
+		for _, f := range frames {
+			if derr := s.add(f); derr != nil {
+				return derr
+			}
+			note(s, f)
+			if o.onFrame != nil {
+				o.onFrame(f)
+			}
 		}
-		note(s, obj)
-		if o.onFrame != nil {
-			o.onFrame(obj)
+		for _, f := range o.markup.tailFrames() {
+			if derr := s.add(f); derr != nil {
+				return derr
+			}
+			note(s, f)
+			if o.onFrame != nil {
+				o.onFrame(f)
+			}
+			frames = append(frames, f)
 		}
 		if err = s.complete(); err != nil {
 			return err
 		}
 		if emit != nil {
-			for _, v := range obj["choices"].([]any) {
-				ch := v.(map[string]any)
-				ch["delta"] = ch["message"]
-				delete(ch, "message")
+			for _, f := range frames {
+				for _, v := range f["choices"].([]any) {
+					ch, ok := v.(map[string]any)
+					if !ok {
+						continue
+					}
+					if ch["message"] != nil {
+						ch["delta"] = ch["message"]
+						delete(ch, "message")
+					}
+				}
+				f["object"] = "chat.completion.chunk"
+				if derr := emit(sseEvent{}, f); derr != nil {
+					return derr
+				}
 			}
-			obj["object"] = "chat.completion.chunk"
-			return emit(sseEvent{}, obj)
+			return nil
 		}
 		return nil
 	}
@@ -966,15 +995,70 @@ func consume(r io.Reader, s *completionState, emit func(sseEvent, map[string]any
 		obj   map[string]any
 	}
 	var prelude []buffered
+	// deliver 把一帧送进聚合状态并按序透出（含 prelude 续传与已透出正文的回收）。
+	// 标记还原（WithMarkupRepair）展开出的正文帧 / 调用帧 / 收尾帧与流尾兑底帧
+	// 都走这里：合成帧不绕过任何既有校验（index 唯一、finish 顺序、tool_calls
+	// 完整性），与非合成帧同一条路径。
+	deliver := func(e sseEvent, f map[string]any) error {
+		if derr := s.add(f); derr != nil {
+			return derr
+		}
+		note(s, f)
+		if o.onFrame != nil {
+			o.onFrame(f)
+		}
+		if emit != nil {
+			if len(s.choices) == 0 {
+				prelude = append(prelude, buffered{e, f})
+				return nil
+			}
+			for _, b := range prelude {
+				if derr := emit(b.event, b.obj); derr != nil {
+					return derr
+				}
+			}
+			prelude = nil
+			if derr := emit(e, f); derr != nil {
+				return derr
+			}
+			// Native Chat can discard delivered text; translating consumers retain
+			// bounded state for their terminal response object.
+			if !s.aggregate {
+				for _, c := range s.choices {
+					for _, k := range []string{"content", "reasoning", "reasoning_content", "refusal", "annotations"} {
+						delete(c.message, k)
+						delete(c.messageStrings, k)
+					}
+					delete(c.fields, "logprobs")
+				}
+			}
+		}
+		return nil
+	}
+	// flushTail 在流收尾前把标记还原层仍持有的未判定字节原文交还（绝不吞字节）。
+	flushTail := func() error {
+		for _, f := range o.markup.tailFrames() {
+			if derr := deliver(sseEvent{}, f); derr != nil {
+				return derr
+			}
+		}
+		return nil
+	}
 	for {
 		e, err := parser.next()
 		if err == io.EOF {
+			if derr := flushTail(); derr != nil {
+				return derr
+			}
 			return s.complete()
 		}
 		if err != nil {
 			return err
 		}
 		if e.Data == "[DONE]" {
+			if derr := flushTail(); derr != nil {
+				return derr
+			}
 			return s.complete()
 		}
 		obj, err := jsondoc.Object([]byte(e.Data))
@@ -991,37 +1075,13 @@ func consume(r io.Reader, s *completionState, emit func(sseEvent, map[string]any
 		if s.bytes > maxAggregate {
 			return fmt.Errorf("completion exceeds bounded state limit")
 		}
-		if err = s.add(obj); err != nil {
-			return err
-		}
-		note(s, obj)
-		if o.onFrame != nil {
-			o.onFrame(obj)
-		}
-		if emit != nil {
-			if len(s.choices) == 0 {
-				prelude = append(prelude, buffered{e, obj})
-				continue
+		for fi, f := range o.markup.expand(obj) {
+			ev := e
+			if fi > 0 {
+				ev = sseEvent{} // 合成帧不携带原事件的 event/id 行
 			}
-			for _, b := range prelude {
-				if err = emit(b.event, b.obj); err != nil {
-					return err
-				}
-			}
-			prelude = nil
-			if err = emit(e, obj); err != nil {
-				return err
-			}
-			// Native Chat can discard delivered text; translating consumers retain
-			// bounded state for their terminal response object.
-			if !s.aggregate {
-				for _, c := range s.choices {
-					for _, k := range []string{"content", "reasoning", "reasoning_content", "refusal", "annotations"} {
-						delete(c.message, k)
-						delete(c.messageStrings, k)
-					}
-					delete(c.fields, "logprobs")
-				}
+			if derr := deliver(ev, f); derr != nil {
+				return derr
 			}
 		}
 	}
