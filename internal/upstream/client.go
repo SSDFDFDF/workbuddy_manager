@@ -660,9 +660,10 @@ type Client struct {
 
 	// Fingerprints 出站请求体指纹改写层（默认关闭 = 严格逐字透传）。
 	//
-	// 层内 = 内置 7 类实测指纹 + 自定义规则（config fingerprint_rules）。
-	// 用 atomic.Pointer 持有不可变规则集：面板热改规则 = 整体替换一层，
-	// chat 热路径读到的永远是一致视图，无锁。
+	// 层内 = 内置指纹表（可按 ID 停用/覆盖替换文本）+ 自定义规则
+	//（config fingerprint_rewrite / fingerprint_disabled / fingerprint_overrides /
+	// fingerprint_rules）。用 atomic.Pointer 持有不可变规则集：面板热改规则 = 整体
+	// 替换一层，chat 热路径读到的永远是一致视图，无锁。
 	//
 	// 默认关闭的理由：它**会改用户内容**（如 11128 → 11-128）。
 	// system 来源的指纹已由 prompt.mode=replace/after 从源头解决，
@@ -965,7 +966,7 @@ func (c *Client) buildOutbound(in ChatInput, realm, uid, conversationID, princip
 //
 // 两道闸控成本：
 //  1. 开关关闭（默认）→ 一个 atomic 读取，其余零开销；
-//  2. 开关打开但请求体无指纹哨兵 → scrub.Sentinel 在原始字节上扫 5 个必要
+//  2. 开关打开但请求体无指纹哨兵 → l.Dirty 在原始字节上扫编译后的哨兵
 //     子串（~13 GB/s），未命中即跳过整次遍历（实测干净路径 0 分配）。
 //
 // 不改验证契约：未知字段照旧原样保留、不修复历史（改写只作用于已识别的指纹字段）。

@@ -164,7 +164,7 @@ func main() {
 	}
 	// 出站指纹改写层（默认关闭 = 严格逐字透传）。自定义规则非法时
 	// normalize 已 fail fast，这里构建不会失败。
-	scrubLayer, err := buildScrubLayer(cfg.FingerprintRewrite, cfg.FingerprintRules)
+	scrubLayer, err := buildScrubLayer(cfg.FingerprintRewrite, cfg.FingerprintDisabled, cfg.FingerprintOverrides, cfg.FingerprintRules)
 	if err != nil {
 		log.Fatalf("fingerprint rules: %v", err)
 	}
@@ -717,7 +717,7 @@ func saveConfigTx(raw []byte, path string, hot *hotTargets) ([]string, error) {
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)
 	p.SetPreferExpiring(newCfg.Pool.PreferExpiring)
 	// 指纹改写层热生效：开关与自定义规则都无需重启（整体替换不可变层）。
-	newScrub, err := buildScrubLayer(newCfg.FingerprintRewrite, newCfg.FingerprintRules)
+	newScrub, err := buildScrubLayer(newCfg.FingerprintRewrite, newCfg.FingerprintDisabled, newCfg.FingerprintOverrides, newCfg.FingerprintRules)
 	if err != nil {
 		return nil, err
 	}
@@ -820,16 +820,9 @@ func archiveConfigFrom(stateFile string, c *config.Config) reqlog.Config {
 
 // buildScrubLayer 由配置构建出站指纹改写层。
 //
-// 开关关闭时自定义规则**也一并忽略**（不构建、不参与预检）：避免
+// 开关关闭时内置与自定义规则**一并忽略**（不构建、不参与预检）：避免
 // "关着开关却仍要付一份哨兵扫描成本"这种反直觉行为。规则非法时返回错误
 // （normalize 已校验过，这里是二次防护，供不经 normalize 的调用路径使用）。
-func buildScrubLayer(enabled bool, rules []scrub.Rule) (*scrub.Layer, error) {
-	if !enabled {
-		return scrub.NewLayer(false, nil), nil
-	}
-	custom, err := scrub.Build(rules)
-	if err != nil {
-		return nil, err
-	}
-	return scrub.NewLayer(true, custom), nil
+func buildScrubLayer(enabled bool, disabled []string, overrides map[string]string, rules []scrub.Rule) (*scrub.Layer, error) {
+	return scrub.BuildLayer(enabled, disabled, overrides, rules)
 }

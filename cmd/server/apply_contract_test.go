@@ -30,6 +30,8 @@ var hotAppliedPaths = []string{
 	"logging.request_archive_max_mb",
 	// 出站指纹改写层（不可变层整体替换）
 	"fingerprint_rewrite",
+	"fingerprint_disabled",
+	"fingerprint_overrides.*",
 	"fingerprint_rules",
 	// 媒体策略（进程级原子快照）
 	"media.tool_images",

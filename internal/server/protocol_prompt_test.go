@@ -113,7 +113,16 @@ func TestProtocolPromptCompositionPreservesToolContract(t *testing.T) {
 					if rec.Code != 200 || attempts != 1 {
 						t.Fatal(rec.Code, rec.Body, attempts)
 					}
-					for _, key := range []string{"tools", "tool_choice", "parallel_tool_calls"} {
+					expectedTools := baseline["tools"]
+					if fingerprint {
+						expObj, _ := jsondoc.Object(baselineRaw)
+						scrub.Object(expObj)
+						expectedTools = expObj["tools"]
+					}
+					if !reflect.DeepEqual(sent["tools"], expectedTools) {
+						t.Fatalf("tools changed: %#v / %#v", sent["tools"], expectedTools)
+					}
+					for _, key := range []string{"tool_choice", "parallel_tool_calls"} {
 						if !reflect.DeepEqual(sent[key], baseline[key]) {
 							t.Fatalf("%s changed: %#v / %#v", key, sent[key], baseline[key])
 						}

@@ -31,8 +31,18 @@ function SubHead({ children }: { children: React.ReactNode }) {
   return <div className="mt-1 mb-0.5 text-[12.5px] font-semibold text-[var(--ink-2)]">{children}</div>;
 }
 
-/* 内置指纹表模态框：后端下发的只读静态表（编译期常量，不可关闭）。 */
-function BuiltinRulesDialog({ onClose }: { onClose: () => void }) {
+/* 内置指纹表模态框：支持按 ID 单独开启/停用与改写文本覆盖。 */
+function BuiltinRulesDialog({
+  disabled,
+  overrides,
+  onChange,
+  onClose,
+}: {
+  disabled: string[];
+  overrides: Record<string, string>;
+  onChange: (disabled: string[], overrides: Record<string, string>) => void;
+  onClose: () => void;
+}) {
   const [rules, setRules] = useState<BuiltinScrubRule[] | null>(null);
   const [err, setErr] = useState('');
   useEffect(() => {
@@ -44,20 +54,65 @@ function BuiltinRulesDialog({ onClose }: { onClose: () => void }) {
       alive = false;
     };
   }, []);
+
+  const toggle = (id: string, on: boolean) => {
+    let next: string[];
+    if (on) {
+      next = disabled.filter((x) => x !== id);
+    } else {
+      next = disabled.includes(id) ? disabled : [...disabled, id];
+    }
+    onChange(next, overrides);
+  };
+
+  const setOverride = (id: string, val: string) => {
+    // 清空输入框 = 恢复默认（删键），与后端"空串覆盖回落内置默认"的语义一致，
+    // 不把空串存进配置（否则"恢复"按钮状态与生效值不一致）。
+    const next = { ...overrides };
+    if (val === '') delete next[id];
+    else next[id] = val;
+    onChange(disabled, next);
+  };
+
+  const resetOverride = (id: string) => {
+    const next = { ...overrides };
+    delete next[id];
+    onChange(disabled, next);
+  };
+
   const n = rules?.length ?? 0;
+  const isErr11128Off = disabled.includes('err-11128');
+
   return (
     <Dialog
-      title="内置指纹表"
-      hint={`网关内置的逐字改写规则（编译期常量，启用后恒生效、不可关闭）。自定义规则在其上叠加。${n ? ` 共 ${n} 条。` : ''}`}
+      title="管理内置指纹表"
+      hint={`网关内置出站指纹改写规则（默认全启用）。支持按 ID 单独开关或覆盖改写目标；修改后点击主界面「保存配置」即时生效。${n ? ` 共 ${n} 条。` : ''}`}
       onClose={onClose}
-      width={720}
+      width={860}
+      footer={
+        <div className="flex w-full items-center justify-between">
+          <div className="text-[11.5px] text-[var(--ink-3)]">
+            更改已暂存，关闭后请点击底栏「保存配置」使改动热生效。
+          </div>
+          <button type="button" className={btnPrimary} onClick={onClose}>
+            完成
+          </button>
+        </div>
+      }
     >
       {err && <div className="text-[12.5px] text-[var(--bad)]">{err}</div>}
       {!err && !rules && <div className="text-[12.5px] text-[var(--ink-3)]">加载中…</div>}
+      {isErr11128Off && (
+        <div className="mb-3 rounded-lg border border-[var(--bad)]/30 bg-[var(--bad)]/10 px-3 py-2 text-[12px] text-[var(--bad)]">
+          ⚠️ 注意：已停用 <code>err-11128</code> 规则。若对话或工具中出现裸 11128，上游将直接阻断请求（HTTP 400）。
+        </div>
+      )}
       {rules && (
         <table className="w-full border-collapse text-[12px]">
           <thead>
             <tr className="border-b border-[var(--line-soft)] text-left text-[11.5px] text-[var(--ink-2)]">
+              <th className="px-2 py-1.5 font-medium whitespace-nowrap">启/停</th>
+              <th className="px-2 py-1.5 font-medium whitespace-nowrap">规则 ID</th>
               <th className="px-2 py-1.5 font-medium whitespace-nowrap">类型</th>
               <th className="px-2 py-1.5 font-medium">匹配</th>
               <th className="px-2 py-1.5 font-medium">改写为</th>
@@ -65,24 +120,64 @@ function BuiltinRulesDialog({ onClose }: { onClose: () => void }) {
             </tr>
           </thead>
           <tbody className="divide-y divide-[var(--line-soft)]/60 align-top">
-            {rules.map((r, i) => (
-              <tr key={i}>
-                <td className="px-2 py-1.5 whitespace-nowrap">
-                  <Tag tone={r.kind === 'literal' ? 'ok' : 'warn'}>{r.kind === 'literal' ? '逐字' : '模式'}</Tag>
-                </td>
-                <td className="px-2 py-1.5">
-                  <code className="break-all text-[11.5px] text-[var(--ink)]">{r.match}</code>
-                </td>
-                <td className="px-2 py-1.5">
-                  {r.replace ? (
-                    <code className="break-all text-[11.5px] text-[var(--ink)]">{r.replace}</code>
-                  ) : (
-                    <Tag tone="bad">整段删除</Tag>
-                  )}
-                </td>
-                <td className="px-2 py-1.5 text-[11.5px] text-[var(--ink-3)]">{r.note || '—'}</td>
-              </tr>
-            ))}
+            {rules.map((r) => {
+              const isOff = disabled.includes(r.id);
+              const isOverridden = r.id in overrides;
+              const currentReplace = overrides[r.id] ?? r.replace ?? '';
+              const canEditReplace = r.kind === 'literal' || r.id === 'hdr-billing-bare';
+
+              return (
+                <tr key={r.id} className={isOff ? 'opacity-40 transition-opacity' : 'transition-opacity'}>
+                  <td className="px-2 py-2 whitespace-nowrap">
+                    <Switch
+                      label=""
+                      name={`rule-${r.id}`}
+                      checked={!isOff}
+                      onChange={(on) => toggle(r.id, on)}
+                    />
+                  </td>
+                  <td className="px-2 py-2 whitespace-nowrap">
+                    <code className="rounded bg-[var(--surface-2)] px-1.5 py-0.5 text-[11px] font-semibold text-[var(--ink)]">
+                      {r.id}
+                    </code>
+                  </td>
+                  <td className="px-2 py-2 whitespace-nowrap">
+                    <Tag tone={r.kind === 'literal' ? 'ok' : 'warn'}>
+                      {r.kind === 'literal' ? '逐字' : '模式'}
+                    </Tag>
+                  </td>
+                  <td className="max-w-[180px] px-2 py-2">
+                    <code className="break-all text-[11px] text-[var(--ink)]">{r.match}</code>
+                  </td>
+                  <td className="min-w-[180px] px-2 py-2">
+                    {canEditReplace ? (
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          disabled={isOff}
+                          value={currentReplace}
+                          onChange={(e) => setOverride(r.id, e.target.value)}
+                          className="flex-1 rounded border border-[var(--line)] bg-[var(--surface)] px-2 py-1 font-[family-name:var(--mono)] text-[11px] disabled:opacity-40"
+                        />
+                        {isOverridden && (
+                          <button
+                            type="button"
+                            className="shrink-0 text-[11px] text-[var(--accent)] hover:underline"
+                            onClick={() => resetOverride(r.id)}
+                            title="恢复为默认改写词"
+                          >
+                            恢复
+                          </button>
+                        )}
+                      </div>
+                    ) : (
+                      <Tag tone="bad">整段删除</Tag>
+                    )}
+                  </td>
+                  <td className="px-2 py-2 text-[11.5px] text-[var(--ink-3)]">{r.note || '—'}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       )}
@@ -131,6 +226,8 @@ export function ConfigView() {
         else v[name] = val == null ? '' : String(val);
       }
       v['fingerprint_rules_text'] = formatRules(cfg.fingerprint_rules);
+      v['fingerprint_disabled_json'] = JSON.stringify(cfg.fingerprint_disabled || []);
+      v['fingerprint_overrides_json'] = JSON.stringify(cfg.fingerprint_overrides || {});
       setValues(v);
       const gt = cfg.growth?.autotasks?.tasks;
       setGrowthTasks(gt && Object.keys(gt).length ? JSON.stringify(gt, null, 2) : '');
@@ -178,6 +275,32 @@ export function ConfigView() {
     }
     return out;
   }, [values]);
+
+  const fpDisabled = useMemo<string[]>(() => {
+    try {
+      const d = JSON.parse(String(values['fingerprint_disabled_json'] || '[]'));
+      return Array.isArray(d) ? d : [];
+    } catch {
+      return [];
+    }
+  }, [values['fingerprint_disabled_json']]);
+
+  const fpOverrides = useMemo<Record<string, string>>(() => {
+    try {
+      const o = JSON.parse(String(values['fingerprint_overrides_json'] || '{}'));
+      return typeof o === 'object' && o !== null ? o : {};
+    } catch {
+      return {};
+    }
+  }, [values['fingerprint_overrides_json']]);
+
+  const handleFpChange = (newDisabled: string[], newOverrides: Record<string, string>) => {
+    setValues((s) => ({
+      ...s,
+      fingerprint_disabled_json: JSON.stringify(newDisabled),
+      fingerprint_overrides_json: JSON.stringify(newOverrides),
+    }));
+  };
 
   const promptDraft = () => ({ prompt: collectConfig(formData).prompt || {} });
 
@@ -699,9 +822,18 @@ export function ConfigView() {
             </div>
             <div>
               <button type="button" className={btnXsPrimary} onClick={() => setShowBuiltinRules(true)}>
-                查看内置指纹表
+                管理内置指纹表
               </button>
-              <span className="ml-2 text-[11.5px] text-[var(--ink-3)]">启用即含内置表（不可单独关闭），自定义规则在其上叠加。</span>
+              <span className="ml-2 text-[11.5px] text-[var(--ink-3)]">
+                {(() => {
+                  const disCount = fpDisabled.length;
+                  const ovCount = Object.keys(fpOverrides).length;
+                  const bits: string[] = ['内置表默认全启用（按 ID 可单独停用或覆盖改写目标）'];
+                  if (disCount > 0) bits.push(`已停用 ${disCount} 项`);
+                  if (ovCount > 0) bits.push(`已覆盖 ${ovCount} 项`);
+                  return bits.join(' ｜ ');
+                })()}
+              </span>
             </div>
             <div className="flex items-center gap-2 text-[12.5px] font-medium text-[var(--ink-2)]">
               自定义规则
@@ -737,7 +869,14 @@ export function ConfigView() {
         )}
 
         {/* 内置指纹表模态框 */}
-        {showBuiltinRules && <BuiltinRulesDialog onClose={() => setShowBuiltinRules(false)} />}
+        {showBuiltinRules && (
+          <BuiltinRulesDialog
+            disabled={fpDisabled}
+            overrides={fpOverrides}
+            onChange={handleFpChange}
+            onClose={() => setShowBuiltinRules(false)}
+          />
+        )}
 
         {/* 保存条 */}
         <div className="sticky bottom-4 flex items-center gap-2.5 rounded-xl border border-[var(--line)] bg-[var(--raise)] px-4 py-3 shadow-lg">

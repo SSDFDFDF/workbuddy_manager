@@ -17,7 +17,7 @@
 | 2 | **响应统一管线** | 流式与非流式共用同一 SSE 解析与完成判定；HTTP 错误与 `error` 帧同一分类；按 choice index 独立聚合；错误帧/截断不再伪装成功；新增首模型事件/首生成/尾部阶段超时 | 生效 |
 | 3 | **重试与账号策略** | 仅「明确未受理」才换号；已生成/已提交一律不重放；限流与配额不跨账号绕过 | 生效 |
 | 4 | **系统提示词体系** | 组合位置 `none`/`replace`/`after`/`append`/`inject` + 六种内置预设（`official-*` 为官方渲染产物逐字，`default` 为自设计位）+ 按账号域覆盖 + 面板预览；预设是静态 MD 加载即用，无模板标记、无运行期变量改写；导出工具见 [scripts/render-official-presets.py](scripts/render-official-presets.py)，官方模板归档见 [docs/official-templates/README.md](docs/official-templates/README.md) | `none` |
-| 5 | **出站指纹改写层** | 改写 user/assistant/tool/推理/工具入参里的已知指纹串（内置 7 类 + 自定义规则） | `false` |
+| 5 | **出站指纹改写层** | 改写 user/assistant/tool/推理/工具入参及 tools 声明里的已知指纹串（内置 10 条：7 逐字 + 3 变长模式；按 ID 禁用黑名单 + 替换文本覆盖 + 自定义规则） | `false` |
 | 6 | **分域身份与 UA** | 按 `realm × 用途` 生成版本、产品名、Origin、语言与 UA；不随代理域名变化 | CN `5.7.6`/Global `5.6.2` |
 | 7 | **缓存键** | `prompt_cache_key` 改 HMAC 派生（持久化 secret）；无显式会话则不生成 | 生效 |
 | 8 | **配置读写从简** | 单份 `config.json` 即唯一真相：读取只认已知键（不认识的键忽略并告警），保存 = 提交叠加到磁盘现值后按当前 schema 整份覆盖 | 生效 |
@@ -81,7 +81,7 @@
 | 图片转码/压缩 | **新增** `internal/media/image.go`；`cmd/server/{config,main}.go`；面板表单项（`frontend/src/{configSchema.ts,views/ConfigView.tsx}`） |
 | 重试与账号策略 | `internal/server/handler.go`、`internal/upstream/client.go` |
 | 系统提示词 | `internal/prompt/`、`internal/config/prompt.go` + `internal/config/prompt_preview.go`（重新导出：`make templates-export`） |
-| 指纹改写 | **新增** `internal/scrub/` |
+| 指纹改写 | **新增** `internal/scrub/`；`internal/config/{schema,normalize,catalog}.go`、`cmd/server/main.go`、`internal/panel/panel.go`、面板表单项（`frontend/src/{configSchema.ts,types.ts,views/ConfigView.tsx}`） |
 | 分域身份与 UA | **新增** `internal/upstream/identity.go`、`internal/auth/snapshot.go`；`internal/upstream/{headers,client,desktop,hint,usage}.go` |
 | 缓存键 / 配置容错 | `internal/upstream/cache_key.go`、`cmd/server/{config,config_warnings,main}.go` |
 | 出站代理 | `internal/proxy/`、`internal/auth/auth.go`、`internal/upstream/proxy.go` |
@@ -90,6 +90,39 @@
 | 模型目录门禁 | **新增** `internal/upstream/catalog.go`、`internal/server/modelcheck.go`；`internal/server/handler.go`、`internal/panel/panel.go`、`cmd/server/main.go` |
 | 面板 | 源码 `frontend/src/`（React + Vite）；构建产物 `internal/panel/web/`（`go:embed`）；后端 `internal/panel/{config.go,panel.go,web_embed.go}` |
 | 成长任务自动化策略 | `internal/config/{schema,normalize,catalog}.go`、`internal/panel/autotask_policy.go`（**新增**）、`internal/panel/{autotask,taskcenter,tasks}.go`、`internal/upstream/blackcat.go`（`InWindow`）、`internal/scheduler/{scheduler.go,blackcat.go}`、`cmd/server/main.go`、面板表单项（`frontend/src/{configSchema.ts,views/ConfigView.tsx}`） |
+
+---
+
+## 5. 出站指纹改写策略（`fingerprint_*`）
+
+内置指纹表（`internal/scrub/`）默认全启用，可按稳定 ID 停用或覆盖替换文本；自定义规则叠加在最上层。
+全部字段热生效（面板保存即生效，无需重启）。
+
+| 配置键 | 语义 | 缺省 |
+| --- | --- | --- |
+| `fingerprint_rewrite` | 总开关（关 = 严格逐字透传，内置与自定义一并忽略） | `false` |
+| `fingerprint_disabled` | 禁用的内置规则 ID 黑名单（未知 ID 告警并按配置剔除；停用 `err-11128` 会额外告警） | 空 = 全启用 |
+| `fingerprint_overrides` | 逐内置规则的替换文本覆盖（键 = rule_id；空串 = 用内置默认） | 空 = 全用内置默认 |
+| `fingerprint_rules` | 自定义规则（在内置表之上叠加，语法见面板「规则文本」提示） | 空 = 无自定义 |
+
+内置规则 ID 清单（面板「管理内置指纹表」弹窗可视化编辑）：
+
+| ID | 类型 | 说明 |
+| --- | --- | --- |
+| `hdr-billing` | 模式 | 图灵/计费 header 键值段整段删除（大小写不敏感） |
+| `hdr-billing-bare` | 模式 | 残留裸键名缩写（默认 `x-anthropic-billing-hdr`，可覆盖） |
+| `cc-kv` | 模式 | 尾随 `cc_` 键值段整段删除 |
+| `identity-claude-code` | 逐字 | Claude Code CLI 身份句（official CLI → CLI tool） |
+| `identity-claude-agent-sdk` | 逐字 | Claude Agent SDK 身份句（Agent SDK → Agent SDK tool） |
+| `pr-branch` | 逐字 | `Main branch (…)` → `Default branch (…)` |
+| `identity-codex` | 逐字 | Codex CLI 身份句 → Codex CLI tool |
+| `identity-codex-alt` | 逐字 | `You are Codex,` → `You are the Codex assistant,` |
+| `feedback-issue` | 逐字 | 反馈 issue 句（give → provide feedback） |
+| `err-11128` | 逐字 | 裸 `11128` → `11-128`（上游反探测错误码） |
+
+遍历通道：`messages[].content`（字符串与多模态 text 块）、`reasoning_content` / `reasoning`、
+`tool_calls[].function.arguments`，以及 `tools[].function.description` 与 `parameters.properties.*.description` / `.title`。
+image part 与工具名不改（改写会破坏数据或契约）。
 
 ---
 

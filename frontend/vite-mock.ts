@@ -104,6 +104,25 @@ export function mockApi(): Plugin {
           return;
         }
 
+        // 内置指纹表（面板「管理内置指纹表」弹窗；ID 与 scrub.BuiltinRules 同源）
+        if (req.method === 'GET' && path === 'scrub/builtin') {
+          res.end(JSON.stringify({
+            rules: [
+              { id: "hdr-billing", kind: "pattern", match: "x-anthropic-billing-header:<值>[;]", note: "#1 图灵/计费 header 键值段整段删除（大小写不敏感）" },
+              { id: "hdr-billing-bare", kind: "pattern", match: "x-anthropic-billing-header（裸键名）", replace: "x-anthropic-billing-hdr", note: "#1 残留裸键名缩写为 x-anthropic-billing-hdr" },
+              { id: "cc-kv", kind: "pattern", match: "cc_<name>=<值>[;]", note: "#2 尾随 cc_ 键值段整段删除（词边界 + 大小写不敏感）" },
+              { id: "identity-claude-code", kind: "literal", match: "You are Claude Code, Anthropic's official CLI for Claude", replace: "You are Claude Code, Anthropic's official CLI tool for Claude", note: "#3 Claude Code 身份句（official CLI → CLI tool）" },
+              { id: "identity-claude-agent-sdk", kind: "literal", match: "You are a Claude agent, built on Anthropic's Claude Agent SDK", replace: "You are a Claude agent, built on Anthropic's Claude Agent SDK tool", note: "#3b Claude Agent SDK 身份句（Agent SDK → Agent SDK tool）" },
+              { id: "pr-branch", kind: "literal", match: "Main branch (you will usually use this for PRs)", replace: "Default branch (you will usually use this for PRs)", note: "#4 PR 分支注入句（Main branch → Default branch）" },
+              { id: "identity-codex", kind: "literal", match: "You are a coding agent running in the Codex CLI, a terminal-based coding assistant.", replace: "You are a coding agent running in the Codex CLI tool, a terminal-based coding assistant.", note: "#5 Codex 身份句（Codex CLI → Codex CLI tool）" },
+              { id: "identity-codex-alt", kind: "literal", match: "You are Codex,", replace: "You are the Codex assistant,", note: "#5b Codex 备用身份句（You are Codex, → You are the Codex assistant,）" },
+              { id: "feedback-issue", kind: "literal", match: "To give feedback, users should report the issue at https://github.com/anthropics/claude-code/issues", replace: "To provide feedback, users should report the issue at https://github.com/anthropics/claude-code/issues", note: "#6 反馈 issue 句（give → provide feedback）" },
+              { id: "err-11128", kind: "literal", match: "11128", replace: "11-128", note: "#7 反探测错误码 11128（上游见到裸串即整单拦截）" }
+            ]
+          }));
+          return;
+        }
+
         // 默认返回成功，支持其他如 balance_all, checkin_all 的 POST 操作
         res.end(JSON.stringify({ status: 'ok' }));
       });

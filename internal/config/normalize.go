@@ -426,21 +426,90 @@ func normalizeModelDefaultRealm(v string) string {
 	}
 }
 
-// normalizeFingerprintRules 校验自定义改写规则并把归一化结果写回配置。
+// normalizeFingerprintRules 校验指纹配置（禁用项、覆盖项及自定义改写规则）并把归一化结果写回配置。
 //
-// 为什么在 normalize 阶段就试编译（而不是等到装配 client）：
-// 非法规则要在**启动/保存时报错**——若推迟到运行期，用户会看到"配置已保存"
-// 但改写静默不生效（或整层失效），排查成本高得多。试编译同时完成
-// mode/action 的归一化（空 = 缺省），使面板回显的就是生效值。
+// 非法自定义规则在**启动/保存时报错**（scrub.Build 试编译，与历史行为一致）；
+// 禁用/覆盖里的未知 ID 只告警并从配置剔除（不阻断启动，面板可见）。
 func (c *Config) normalizeFingerprintRules() error {
-	if len(c.FingerprintRules) == 0 {
+	// 1. 归一化禁用项（去重、去空、未知 ID 告警）
+	disSet := make(map[string]bool)
+	if len(c.FingerprintDisabled) > 0 {
+		cleaned := make([]string, 0, len(c.FingerprintDisabled))
+		seen := make(map[string]bool)
+		for _, raw := range c.FingerprintDisabled {
+			id := strings.TrimSpace(raw)
+			if id == "" || seen[id] {
+				continue
+			}
+			seen[id] = true
+			if !scrub.IsValidBuiltinID(id) {
+				c.addWarning("fingerprint_disabled: 未知规则 ID " + id + "（已忽略）")
+				continue
+			}
+			if id == "err-11128" {
+				c.addWarning("fingerprint_disabled: err-11128 已被禁用——请求中出现裸 11128 将被上游整单拦截")
+			}
+			disSet[id] = true
+			cleaned = append(cleaned, id)
+		}
+		if len(cleaned) == 0 {
+			c.FingerprintDisabled = nil
+		} else {
+			c.FingerprintDisabled = cleaned
+		}
+	} else {
+		c.FingerprintDisabled = nil
+	}
+
+	// 2. 归一化覆盖项（未知 ID 告警、长度校验）
+	if len(c.FingerprintOverrides) > 0 {
+		cleaned := make(map[string]string)
+		for rawID, rawVal := range c.FingerprintOverrides {
+			id := strings.TrimSpace(rawID)
+			if id == "" {
+				continue
+			}
+			if !scrub.IsValidBuiltinID(id) {
+				c.addWarning("fingerprint_overrides: 未知规则 ID " + id + "（已忽略）")
+				continue
+			}
+			if !scrub.ReplaceableBuiltin(id) {
+				c.addWarning("fingerprint_overrides: " + id + " 是整段删除模式，替换文本不生效（已忽略；如需停用请用 fingerprint_disabled）")
+				continue
+			}
+			val := strings.TrimSpace(rawVal)
+			if val == "" {
+				// 空串 = 用内置默认（与面板清空输入框的语义一致）。
+				continue
+			}
+			if len(val) > 512 {
+				return fmt.Errorf("fingerprint_overrides[%s]: 替换文本超过 512 字节", id)
+			}
+			if disSet[id] {
+				c.addWarning("fingerprint_overrides: " + id + " 同时被 fingerprint_disabled 停用（覆盖当前不生效）")
+			}
+			cleaned[id] = val
+		}
+		if len(cleaned) == 0 {
+			c.FingerprintOverrides = nil
+		} else {
+			c.FingerprintOverrides = cleaned
+		}
+	} else {
+		c.FingerprintOverrides = nil
+	}
+
+	// 3. 校验自定义规则
+	if len(c.FingerprintRules) > 0 {
+		w, err := scrub.Build(c.FingerprintRules)
+		if err != nil {
+			return fmt.Errorf("fingerprint_rules: %w", err)
+		}
+		c.FingerprintRules = w.Rules()
+	} else {
 		c.FingerprintRules = nil
-		return nil
 	}
-	w, err := scrub.Build(c.FingerprintRules)
-	if err != nil {
-		return fmt.Errorf("fingerprint_rules: %w", err)
-	}
-	c.FingerprintRules = w.Rules()
+
+	// 4. 自定义规则校验已完成（scrub.Build 试编译），层构建由 cmd/server 装配。
 	return nil
 }

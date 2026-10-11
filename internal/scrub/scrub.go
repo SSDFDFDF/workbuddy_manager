@@ -1,10 +1,13 @@
 // Package scrub 出站请求体的上游指纹改写（best-effort，可关闭）。
 //
 // 背景：上游内容审核按**逐字字面**拒绝（不做语义判断，见
-// docs/WORKBUDDY_CLIENT_FEATURES_ANALYSIS.md §6.7.6b 的 7 类指纹清单）。
+// docs/WORKBUDDY_CLIENT_FEATURES_ANALYSIS.md §6.7.6b 的指纹清单）。
 // 其中 system/developer 来源可由 prompt.mode=replace/after 整体规避；
 // **user/assistant/tool 来源清不掉**（用户粘帖报错原文、终端回显、
-// 工具参数、思维链字段、项目规则文件），只能逐字改写。
+// 工具参数、思维链字段、项目规则文件、工具声明描述），只能逐字改写。
+//
+// 规则面：内置指纹表（`BuiltinRules()` 为唯一事实来源）+ 按 ID 禁用/
+// 替换覆盖 + 自定义规则，由 Layer 在配置热改时统一编译（见 layer.go）。
 //
 // # 设计取舍（与历史实现的关键差异）
 //
@@ -15,11 +18,11 @@
 //
 // 本实现按「先证伪、再精确定位」重排：
 //
-//	A. 请求体级哨兵预检：整包 bytes.Index 扫 5 个必要子串（其中一个大小写变体
-//	   双查）。任一不中 → 直接判定「无指纹」，不解析、不遍历、零分配。
-//	   哨兵是超集条件：任何指纹命中都必先命中对应哨兵（有测试守护）。
-//	B. 命中后单遍改写：5 条字面串交给一个 strings.Replacer（内部 trie，
-//	   单次扫描、不重叠、无命中时返回原串）；2 条变长/大小写不敏感的模式
+//	A. 请求体级哨兵预检：整包 bytes.Index 扫必要子串（大小写变体的
+//	   "anthropic" 双查）。任一不中 → 直接判定「无指纹」，不解析、不遍历、
+//	   零分配。哨兵是超集条件：任何指纹命中都必先命中对应哨兵（有测试守护）。
+//	B. 命中后单遍改写：字面串交给一个 strings.Replacer（内部 trie，
+//	   单次扫描、不重叠、无命中时返回原串）；变长/大小写不敏感的模式
 //	   （header 键值段、尾随 cc_ 键值段）由一次手写字节扫描处理，
 //	   顺带完成裸键名的缩写——**没有正则**。
 //	C. 不做全局 TrimSpace。历史实现在每段"净化过"的文本尾部 TrimSpace，
@@ -32,7 +35,6 @@
 package scrub
 
 import (
-	"bytes"
 	"strings"
 )
 
@@ -45,6 +47,9 @@ var literals = []string{
 	// #3 身份句 → 一词替换（official CLI for Claude → …CLI tool for Claude）
 	"You are Claude Code, Anthropic's official CLI for Claude",
 	"You are Claude Code, Anthropic's official CLI tool for Claude",
+	// #3b Agent SDK 身份句 → 一词替换
+	"You are a Claude agent, built on Anthropic's Claude Agent SDK",
+	"You are a Claude agent, built on Anthropic's Claude Agent SDK tool",
 	// #4 注入指令句 → 一词替换
 	"Main branch (you will usually use this for PRs)",
 	"Default branch (you will usually use this for PRs)",
@@ -69,12 +74,10 @@ var literals = []string{
 	"11128", "11-128",
 }
 
-// literalReplacer 上表字面串的单遍改写器（trie，无命中时返回原串不分配）。
-var literalReplacer = strings.NewReplacer(literals...)
-
 // literalNotes 与 literals 的 match→replace 对一一对应（面板展示用说明）。
 var literalNotes = []string{
 	"#3 Claude Code 身份句（official CLI → CLI tool）",
+	"#3b Claude Agent SDK 身份句（Agent SDK → Agent SDK tool）",
 	"#4 PR 分支注入句（Main branch → Default branch）",
 	"#5 Codex 身份句（Codex CLI → Codex CLI tool）",
 	"#5b Codex 备用身份句（You are Codex, → You are the Codex assistant,）",
@@ -82,51 +85,96 @@ var literalNotes = []string{
 	"#7 反探测错误码 11128（上游见到裸串即整单拦截）",
 }
 
-// BuiltinRule 一条内置指纹规则的只读描述（面板展示用）。
+// literalIDs 与 literals 的 match→replace 对一一对应（配置与面板使用的稳定 ID）。
+var literalIDs = []string{
+	"identity-claude-code",
+	"identity-claude-agent-sdk",
+	"pr-branch",
+	"identity-codex",
+	"identity-codex-alt",
+	"feedback-issue",
+	"err-11128",
+}
+
+// BuiltinRule 一条内置指纹规则的描述（面板展示与配置覆盖使用）。
 type BuiltinRule struct {
+	ID      string `json:"id"`                // 稳定规则标识
 	Kind    string `json:"kind"`              // literal（逐字替换）/ pattern（变长模式）
 	Match   string `json:"match"`             // 匹配串或模式描述
 	Replace string `json:"replace,omitempty"` // 替换文本；空串表示整段删除
 	Note    string `json:"note,omitempty"`    // 说明
 }
 
-// BuiltinRules 返回内置指纹表的结构化描述（供面板模态框展示）。
+// BuiltinRules 返回内置指纹表的结构化描述（供面板模态框展示与配置校验）。
 //
 // literal 部分直接从 literals 派生，不会与改写逻辑漂移（有测试守护长度一致）；
 // pattern 部分描述 stripKeyValues 处理的两类变长/大小写不敏感模式。
 func BuiltinRules() []BuiltinRule {
-	out := make([]BuiltinRule, 0, len(literals)/2+3)
-	for i := 0; i+1 < len(literals); i += 2 {
-		note := ""
-		if j := i / 2; j < len(literalNotes) {
-			note = literalNotes[j]
-		}
+	out := make([]BuiltinRule, 0, len(literalIDs)+3)
+	for i := 0; i < len(literalIDs); i++ {
 		out = append(out, BuiltinRule{
+			ID:      literalIDs[i],
 			Kind:    "literal",
-			Match:   literals[i],
-			Replace: literals[i+1],
-			Note:    note,
+			Match:   literals[i*2],
+			Replace: literals[i*2+1],
+			Note:    literalNotes[i],
 		})
 	}
 	out = append(out,
 		BuiltinRule{
+			ID:    "hdr-billing",
 			Kind:  "pattern",
 			Match: headerName + ":<值>[;]",
 			Note:  "#1 图灵/计费 header 键值段整段删除（大小写不敏感）",
 		},
 		BuiltinRule{
+			ID:      "hdr-billing-bare",
 			Kind:    "pattern",
 			Match:   headerName + "（裸键名）",
 			Replace: headerShort,
 			Note:    "#1 残留裸键名缩写为 " + headerShort,
 		},
 		BuiltinRule{
+			ID:    "cc-kv",
 			Kind:  "pattern",
 			Match: ccPrefix + "<name>=<值>[;]",
 			Note:  "#2 尾随 cc_ 键值段整段删除（词边界 + 大小写不敏感）",
 		},
 	)
 	return out
+}
+
+// BuiltinRuleIDs 返回全部合法的内置规则 ID。
+func BuiltinRuleIDs() []string {
+	rules := BuiltinRules()
+	ids := make([]string, len(rules))
+	for i, r := range rules {
+		ids[i] = r.ID
+	}
+	return ids
+}
+
+// IsValidBuiltinID 报告 id 是否为已知内置规则 ID。
+func IsValidBuiltinID(id string) bool {
+	for _, rid := range BuiltinRuleIDs() {
+		if rid == id {
+			return true
+		}
+	}
+	return false
+}
+
+// ReplaceableBuiltin 报告内置规则是否支持替换文本覆盖。
+//
+// literal 规则全支持；pattern 中只有带替换文本的 hdr-billing-bare 支持；
+// 纯删除模式（hdr-billing / cc-kv）没有替换目标，覆盖会静默无效——配置侧据此告警并剔除。
+func ReplaceableBuiltin(id string) bool {
+	for _, r := range BuiltinRules() {
+		if r.ID == id {
+			return r.Replace != ""
+		}
+	}
+	return false
 }
 
 const (
@@ -139,24 +187,11 @@ const (
 	ccPrefix = "cc_"
 )
 
-// sentinels 请求体级预检哨兵：任一指纹命中都必先命中其中一个。
+// defaultLayer 内置规则全启用的默认层。
 //
-// 覆盖关系（有测试守护）：
-//
-//	#1 header 键名 / #3 身份句 / #6 反馈句 → "nthropic"（或全大写变体）
-//	#2 cc_ 键值                          → "cc_"
-//	#4 Main branch (                     → "Main branch ("
-//	#5 Codex CLI                         → "Codex CLI"
-//	#5b You are Codex,                    → "You are Codex,"
-//	#7 11128                             → "11128"
-var sentinels = [][]byte{
-	[]byte("nthropic"), []byte("NTHROPIC"), // 大小写不敏感的 "anthropic"
-	[]byte(ccPrefix),
-	[]byte("Main branch ("),
-	[]byte("Codex CLI"),
-	[]byte("You are Codex,"),
-	[]byte("11128"),
-}
+// 包级 Text/Object/Sentinel 与 Layer 共用同一套编译结果——避免「新增一条内置
+// 规则只改了一处」的漂移（Layer 从 BuiltinRules() 派生，这里直接复用它）。
+var defaultLayer, _ = BuildLayer(true, nil, nil, nil)
 
 // Sentinel 报告请求体是否可能含指纹（超集判定：false 等价于"确定无指纹"）。
 //
@@ -166,40 +201,13 @@ var sentinels = [][]byte{
 // 已知边界（fail-open，可接受）：若客户端把哨兵字符写成 JSON 转义形式
 // （如 `\u0031` 代替 '1'），本预检会漏判 → 这一层对该请求不生效，
 // 与"未启用该层"等价，不会改坏内容。真实客户端不产出此类转义。
-func Sentinel(body []byte) bool {
-	for _, s := range sentinels {
-		if bytes.Index(body, s) >= 0 {
-			return true
-		}
-	}
-	return false
-}
+func Sentinel(body []byte) bool { return defaultLayer.Dirty(body) }
 
 // Text 改写单段文本。无指纹时返回**同一字符串**（零分配、逐字不变）。
-func Text(s string) string {
-	if !hasSentinel(s) {
-		return s
-	}
-	// 变长/大小写不敏感的两类先扫（它们要按跨度删除，交给 trie 无法表达）。
-	if hasFold(s, headerName) || hasFold(s, ccPrefix) {
-		s = stripKeyValues(s)
-	}
-	// 字面串一遍过（含 11128 → 11-128）。
-	return literalReplacer.Replace(s)
-}
-
-// hasSentinel 报告字符串是否可能含指纹（与 Sentinel 同一套哨兵，作用于字符串）。
-func hasSentinel(s string) bool {
-	return strings.Contains(s, "nthropic") || strings.Contains(s, "NTHROPIC") ||
-		strings.Contains(s, ccPrefix) ||
-		strings.Contains(s, "Main branch (") ||
-		strings.Contains(s, "Codex CLI") ||
-		strings.Contains(s, "You are Codex,") ||
-		strings.Contains(s, "11128")
-}
+func Text(s string) string { return defaultLayer.apply(s) }
 
 // stripKeyValues 单遍扫描：删除 header 键值段与尾随 cc_ 键值段，
-// 并把残留的裸 header 键名缩写为 headerShort。
+// 并把残留的裸 header 键名缩写为 headerShort（或覆盖缩写）。
 //
 // 语义对齐历史实现的三条正则，但**没有正则**：
 //
@@ -209,29 +217,40 @@ func hasSentinel(s string) bool {
 //
 // 与历史实现的差异：只消费「被删段落的尾随空白」，不 TrimSpace 整段文本
 // （历史实现会把用户正文首尾空白一并改掉）。
-func stripKeyValues(s string) string {
-	// 快速路径：两类模式都不在 → 直接返回原串。
-	if !hasFold(s, headerName) && !hasFold(s, ccPrefix) {
+func stripKeyValues(s string, stripKV, stripBare bool, bareShort string, stripCC bool) string {
+	if !stripKV && !stripBare && !stripCC {
 		return s
+	}
+	needHdr := stripKV || stripBare
+	if (!needHdr || !hasFold(s, headerName)) && (!stripCC || !hasFold(s, ccPrefix)) {
+		return s
+	}
+	if bareShort == "" {
+		bareShort = headerShort
 	}
 	var b strings.Builder
 	b.Grow(len(s))
 	for i := 0; i < len(s); {
 		// 1) header 键名（大小写不敏感）。
-		if n := matchFold(s, i, headerName); n > 0 {
-			after := i + n
-			// 键值形态：紧跟 ':' → 整段删除（含值、可选 ';'、尾随空白）。
-			if after < len(s) && s[after] == ':' {
-				i = kvEnd(s, after+1)
-				continue
+		if needHdr {
+			if n := matchFold(s, i, headerName); n > 0 {
+				after := i + n
+				// 键值形态：紧跟 ':'
+				if after < len(s) && s[after] == ':' {
+					if stripKV {
+						i = kvEnd(s, after+1)
+						continue
+					}
+				} else if stripBare {
+					// 裸键名形态（无冒号）：最小缩写，保留可读性。
+					b.WriteString(bareShort)
+					i = after
+					continue
+				}
 			}
-			// 裸键名形态（无冒号）：最小缩写，保留可读性。
-			b.WriteString(headerShort)
-			i = after
-			continue
 		}
 		// 2) 尾随 cc_ 键值（要求词边界，对齐历史正则的 \b）。
-		if s[i] == 'c' || s[i] == 'C' {
+		if stripCC && (s[i] == 'c' || s[i] == 'C') {
 			if (i == 0 || !isWordByte(s[i-1])) && matchFold(s, i, ccPrefix) > 0 {
 				if j, ok := ccKVEnd(s, i); ok {
 					i = j
@@ -340,96 +359,9 @@ func lowerASCII(b byte) byte {
 
 // Object 就地改写请求体文档中的指纹承载字段，返回是否有改动。
 //
-// 覆盖全部实测通道（历史实现的盲区修复保持不变）：
+// 覆盖全部实测通道：
 //   - messages[].content：字符串形态与多模态数组的 text part（image part 不动）；
-//   - messages[].reasoning_content / reasoning：思维链字段（system 指纹会被
-//     镜像进推理文本，裸 11128 这类反探测串同样致命）；
-//   - messages[].tool_calls[].function.arguments：字符串化 JSON，按文本处理。
-//     **这块曾是盲区**：工具调用轮的 content 常为 null，历史实现遇到 content
-//     缺失就 continue，整条消息连同 tool_calls 一起被跳过。
-//
-// 逐字段调用 Text：无指纹的字段返回原串，因此"整包命中但只有一处指纹"时
-// 只有那一个字段被改写。
-func Object(obj map[string]any) bool {
-	msgs, _ := obj["messages"].([]any)
-	if len(msgs) == 0 {
-		return false
-	}
-	changed := false
-	for _, raw := range msgs {
-		m, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		if c, ok := m["content"]; ok {
-			// 按类型就地分支，不走 `content(any) (any, bool)` 那种签名：
-			// 把 string 当 any 返回会引发一次装箱分配，而干净路径要求 0 分配。
-			switch v := c.(type) {
-			case string:
-				if n := Text(v); n != v {
-					m["content"] = n
-					changed = true
-				}
-			case []any:
-				if textParts(v) {
-					changed = true
-				}
-			}
-		}
-		for _, k := range [2]string{"reasoning_content", "reasoning"} {
-			if s, ok := m[k].(string); ok {
-				if ns := Text(s); ns != s {
-					m[k] = ns
-					changed = true
-				}
-			}
-		}
-		if tc, ok := m["tool_calls"].([]any); ok && toolCalls(tc) {
-			changed = true
-		}
-	}
-	return changed
-}
-
-// textParts 改写入多模态 content 数组中的 text part（image / audio part 不动：
-// 其 base64 里不会有指纹，且改写会破坏数据）。
-func textParts(parts []any) bool {
-	changed := false
-	for _, p := range parts {
-		part, ok := p.(map[string]any)
-		if !ok {
-			continue
-		}
-		if t, ok := part["text"].(string); ok {
-			if nt := Text(t); nt != t {
-				part["text"] = nt
-				changed = true
-			}
-		}
-	}
-	return changed
-}
-
-// toolCalls 改写入参（字符串化 JSON），只动 arguments 文本。
-func toolCalls(list []any) bool {
-	changed := false
-	for _, raw := range list {
-		call, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		fn, ok := call["function"].(map[string]any)
-		if !ok {
-			continue
-		}
-		args, ok := fn["arguments"].(string)
-		if !ok {
-			continue
-		}
-		if na := Text(args); na != args {
-			fn["arguments"] = na
-			changed = true
-		}
-	}
-	return changed
-}
+//   - messages[].reasoning_content / reasoning：思维链字段；
+//   - messages[].tool_calls[].function.arguments：工具入参文本；
+//   - tools[].function.description 及 parameters 属性描述/标题：工具声明元数据。
+func Object(obj map[string]any) bool { return defaultLayer.Object(obj) }

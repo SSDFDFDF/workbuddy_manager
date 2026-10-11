@@ -590,8 +590,9 @@ func (p *Panel) modelProbes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// scrubBuiltin 下发内置指纹表（只读静态表，供面板模态框展示）。
-// 内置表是编译期常量、不可关闭；自定义规则在其上叠加（见 fingerprint_rules）。
+// scrubBuiltin 下发内置指纹表（含稳定 ID、类型、默认匹配/改写与说明），供面板模态框
+// 「管理内置指纹表」可视化编辑。内置规则默认全启用，可在 fingerprint_disabled /
+// fingerprint_overrides 中按 ID 停用或覆盖替换文本；自定义规则在其上叠加（见 fingerprint_rules）。
 func (p *Panel) scrubBuiltin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"rules": scrub.BuiltinRules()})
 }

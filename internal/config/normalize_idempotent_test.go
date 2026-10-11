@@ -16,6 +16,7 @@ func TestNormalizeIdempotent(t *testing.T) {
 		[]byte(`{"schedule":{"checkin_hours":[9,9,8]},"pool":{"credit_floor":0},"media":{"image_max_dimension":1080}}`),
 		[]byte(`{"growth":{"autotasks":{"disabled":[" a ","a",""],"only":[],"tasks":{"black_cat":{"window":"23:00-08:00"}}}}}`),
 		[]byte(`{"listen":":1","session_sticky":{"enabled":true,"ttl":"45m"}}`),
+		[]byte(`{"fingerprint_rewrite":true,"fingerprint_disabled":["err-11128","nope","err-11128"," "],"fingerprint_overrides":{"identity-claude-code":"X","hdr-billing":"Y","unknown":"Z","pr-branch":"  "},"fingerprint_rules":[{"match":"A","replace":"B"}]}`),
 	}
 	for i, raw := range raws {
 		c, err := ParseConfig(raw) // ParseConfigInto 内含一次 normalize

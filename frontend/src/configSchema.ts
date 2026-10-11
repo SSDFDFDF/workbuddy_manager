@@ -121,7 +121,7 @@ export const NUMERIC_CFG = new Set([
   'media_image_max_dimension',
 ]);
 
-/* 手工处理字段（结构化，不走通用回填/收集）。 */
+/* 手工处理字段（结构化，不走通用回填/收集；只对 CFG_MAP 里的条目生效）。 */
 export const MANUAL_CFG = new Set(['fingerprint_rules_text']);
 
 /* Go 时长字段：非空必须 ParseDuration 语法（裸 0 合法）。 */
@@ -220,5 +220,21 @@ export function collectConfig(
   }
   const rulesEl = form['fingerprint_rules_text'];
   if (rulesEl) out.fingerprint_rules = parseRules(String(rulesEl.value ?? ''));
+
+  const disEl = form['fingerprint_disabled_json'];
+  if (disEl && disEl.value) {
+    try {
+      const d = JSON.parse(String(disEl.value));
+      if (Array.isArray(d)) out.fingerprint_disabled = d;
+    } catch {}
+  }
+
+  const ovEl = form['fingerprint_overrides_json'];
+  if (ovEl && ovEl.value) {
+    try {
+      const o = JSON.parse(String(ovEl.value));
+      if (typeof o === 'object' && o) out.fingerprint_overrides = o;
+    } catch {}
+  }
   return out;
 }

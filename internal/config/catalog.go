@@ -136,6 +136,8 @@ var entries = Catalog{
 
 	// ── 指纹与媒体 ──────────────────────────────────────────────────────
 	{Path: "fingerprint_rewrite", Mode: Hot, Group: "traffic", Why: ""},
+	{Path: "fingerprint_disabled", Mode: Hot, Group: "traffic", Why: ""},
+	{Path: "fingerprint_overrides.*", Mode: Hot, Group: "traffic", Why: ""},
 	{Path: "fingerprint_rules", Mode: Hot, Group: "traffic", Why: ""},
 	{Path: "media.*", Mode: Hot, Group: "traffic", Why: ""},
 

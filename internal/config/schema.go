@@ -44,16 +44,28 @@ type Config struct {
 
 	// FingerprintRewrite 出站请求体指纹改写（默认 false = 严格逐字透传）。
 	//
-	// 开启后仅改写上游逐字黑名单里的 7 类已知串（internal/scrub）：
-	// Claude Code / Codex 身份句、billing-header 键值、尾随 cc_ 键值、
-	// 反馈整句、裸 11128。这些串出现在 user/assistant/tool 消息里时，
-	// prompt.mode（只作用于 system/developer）清不掉，只能逐字改写。
+	// 开启后按内置指纹表（internal/scrub，共 10 条：7 条逐字 + 3 条变长模式）
+	// 改写 user/assistant/tool/推理/工具入参及 tools 声明里的已知串——
+	// Claude Code / Claude Agent SDK / Codex 身份句、billing-header 键值、
+	// 尾随 cc_ 键值、反馈整句、裸 11128。这些串出现在 system/developer 以外
+	// 的来源时 prompt.mode 清不掉，只能逐字改写。
 	//
 	// 代价：**会改用户可见内容**（如对话里的 11128 变成 11-128），
 	// 因此默认关闭；面板可热改，无需重启。
 	FingerprintRewrite bool `json:"fingerprint_rewrite"`
 
-	// FingerprintRules 自定义改写规则（在内置 7 类指纹之上**叠加**）。
+	// FingerprintDisabled 禁用的内置指纹规则 ID 清单（空 = 全部内置规则启用）。
+	//
+	// 合法 ID 见 scrub.BuiltinRules()（面板「管理内置指纹表」可视化编辑）；
+	// 未知 ID 在 normalize 阶段告警并剔除。停用 err-11128 会额外告警
+	// （请求中出现裸 11128 将被上游整单拦截）。
+	FingerprintDisabled []string `json:"fingerprint_disabled,omitempty"`
+
+	// FingerprintOverrides 逐内置规则的替换文本覆盖（键 = rule_id，值 = 新替换文本）；
+	// 空 = 全部用内置默认。未知 ID 告警并剔除；要停用某条规则请用 FingerprintDisabled。
+	FingerprintOverrides map[string]string `json:"fingerprint_overrides,omitempty"`
+
+	// FingerprintRules 自定义改写规则（在内置指纹之上**叠加**）。
 	//
 	// 用于把“自己遇到的指纹词/句”加进来，例如某个客户端的特殊标记、
 	// 自己的项目名不能出现在请求里、某个内部术语要替换后再出站。

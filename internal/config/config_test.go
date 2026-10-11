@@ -1464,3 +1464,65 @@ func TestPromptPreviewVerbatim(t *testing.T) {
 		t.Errorf("cn preview preset=%q", pv.CN.Preset)
 	}
 }
+
+// TestFingerprintConfig 验证指纹配置的归一化与校验：禁用黑名单、替换覆盖与未知 ID 告警
+func TestFingerprintConfig(t *testing.T) {
+	raw := []byte(`{
+		"fingerprint_rewrite": true,
+		"fingerprint_disabled": ["err-11128", "unknown-rule-id", "hdr-billing", "hdr-billing-bare"],
+		"fingerprint_overrides": {
+			"identity-claude-code": "custom replacement",
+			"bogus-override": "text",
+			"pr-branch": "   ",
+			"hdr-billing": "cannot-override-delete-rule",
+			"hdr-billing-bare": "custom-hdr"
+		},
+		"fingerprint_rules": [
+			{"match": "FOO", "replace": "BAR"}
+		]
+	}`)
+	cfg, err := ParseConfig(raw)
+	if err != nil {
+		t.Fatalf("ParseConfig failed: %v", err)
+	}
+
+	// 1. 未知 ID 应被从 disabled 剔除，留下有效 ID
+	if len(cfg.FingerprintDisabled) != 3 || cfg.FingerprintDisabled[0] != "err-11128" || cfg.FingerprintDisabled[1] != "hdr-billing" || cfg.FingerprintDisabled[2] != "hdr-billing-bare" {
+		t.Errorf("FingerprintDisabled 归一化结果不对: %v", cfg.FingerprintDisabled)
+	}
+
+	// 2. 未知 ID、空串、不可覆盖的删除模式均应剔除；被停用规则的覆盖保留（供重启用后生效）
+	if len(cfg.FingerprintOverrides) != 2 ||
+		cfg.FingerprintOverrides["identity-claude-code"] != "custom replacement" ||
+		cfg.FingerprintOverrides["hdr-billing-bare"] != "custom-hdr" {
+		t.Errorf("FingerprintOverrides 归一化结果不对: %v", cfg.FingerprintOverrides)
+	}
+
+	// 3. 告警应包含 unknown-rule-id 与 err-11128 提示
+	warns := strings.Join(cfg.Warnings, "\n")
+	if !strings.Contains(warns, "unknown-rule-id") {
+		t.Errorf("缺少 unknown-rule-id 告警: %s", warns)
+	}
+	if !strings.Contains(warns, "bogus-override") {
+		t.Errorf("缺少 bogus-override 告警: %s", warns)
+	}
+	if !strings.Contains(warns, "err-11128 已被禁用") {
+		t.Errorf("缺少 err-11128 禁用风险告警: %s", warns)
+	}
+	if !strings.Contains(warns, "整段删除模式") {
+		t.Errorf("缺少不可覆盖模式告警: %s", warns)
+	}
+	if !strings.Contains(warns, "同时被 fingerprint_disabled 停用") {
+		t.Errorf("缺少停用+覆盖重叠告警: %s", warns)
+	}
+
+	// 4. 超长替换文本应直接拒绝
+	bad := []byte(`{
+		"fingerprint_overrides": {
+			"identity-claude-code": "` + strings.Repeat("A", 513) + `"
+		}
+	}`)
+	if _, err := ParseConfig(bad); err == nil {
+		t.Fatal("超长替换文本应报错")
+	}
+}

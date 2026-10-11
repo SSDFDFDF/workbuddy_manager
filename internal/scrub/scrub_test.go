@@ -81,7 +81,7 @@ func TestSentinelIsSuperset(t *testing.T) {
 		if Text(in) != in && !Sentinel(body) {
 			t.Errorf("Text 改动了但 Sentinel 漏判: %q", in)
 		}
-		if Text(in) != in && !hasSentinel(in) {
+		if Text(in) != in && !defaultLayer.hasSentinel(in) {
 			t.Errorf("hasSentinel 漏判: %q", in)
 		}
 	}

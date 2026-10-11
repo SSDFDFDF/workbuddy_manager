@@ -495,3 +495,75 @@ func TestSaveConfigHotReloadProxy(t *testing.T) {
 		t.Fatalf("清空 proxy_url 后应恢复直连，实际 %+v", got)
 	}
 }
+
+// TestSaveConfigFingerprintRoundTrip 指纹配置的后端回环：保存 → 归一化落盘 → 热应用。
+//
+// 钉住面板「管理内置指纹表」的完整保存链路：禁用黑名单 / 替换覆盖 / 自定义规则
+// 都真的进入进程级改写层（而不只是写进 config.json）。
+func TestSaveConfigFingerprintRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{"listen":":1","fingerprint_rewrite":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// 与前端 collectConfig 同形态的 payload（含一个未知 ID，必须被剔除并告警）。
+	payload := []byte(`{
+		"listen":":1",
+		"fingerprint_rewrite": true,
+		"fingerprint_disabled": ["err-11128", "no-such-rule"],
+		"fingerprint_overrides": {"identity-claude-code": "You are Claude Code, masked"},
+		"fingerprint_rules": [{"match":"MY-TOKEN","replace":"X"}]
+	}`)
+	ht := testHotTargets()
+	if _, err := saveConfig(payload, path, ht); err != nil {
+		t.Fatalf("saveConfig: %v", err)
+	}
+
+	// 落盘即归一化：未知 ID 不进文件，有效项保留。
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := config.ParseConfig(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.FingerprintDisabled) != 1 || parsed.FingerprintDisabled[0] != "err-11128" {
+		t.Fatalf("fingerprint_disabled 未归一化落盘: %v", parsed.FingerprintDisabled)
+	}
+	if parsed.FingerprintOverrides["identity-claude-code"] != "You are Claude Code, masked" {
+		t.Fatalf("fingerprint_overrides 未落盘: %v", parsed.FingerprintOverrides)
+	}
+
+	// 热生效：层已替换，且三条配置语义都在层里生效。
+	l := ht.upstream.Fingerprints.Load()
+	if !l.Enabled() {
+		t.Fatal("指纹层未热应用")
+	}
+	obj := map[string]any{"messages": []any{
+		map[string]any{"content": "MY-TOKEN and code=11128"},
+		map[string]any{"content": "You are Claude Code, Anthropic's official CLI for Claude."},
+	}}
+	if !l.Object(obj) {
+		t.Fatal("层未报告改动")
+	}
+	got, _ := json.Marshal(obj)
+	s := string(got)
+	if !strings.Contains(s, "X and code=11128") {
+		t.Errorf("自定义规则或被禁用规则行为不对（MY-TOKEN→X、11128 应保留）: %s", s)
+	}
+	if !strings.Contains(s, "You are Claude Code, masked.") {
+		t.Errorf("替换覆盖未生效: %s", s)
+	}
+	if strings.Contains(s, "Anthropic's official CLI for Claude") {
+		t.Errorf("内置身份句残留: %s", s)
+	}
+
+	// 关闭总开关后再保存：层退回逐字透传（开关与其他字段同一保存链路）。
+	if _, err := saveConfig([]byte(`{"listen":":1","fingerprint_rewrite":false}`), path, ht); err != nil {
+		t.Fatalf("saveConfig(off): %v", err)
+	}
+	if ht.upstream.Fingerprints.Load().Enabled() {
+		t.Fatal("关闭后层应停用")
+	}
+}

@@ -1708,7 +1708,7 @@ func TestPromptRuleFallbackDefault(t *testing.T) {
 }
 
 // TestFingerprintRewriteEndToEnd 出站指纹改写层的端到端行为：
-// 关闭（默认）= 逐字透传；开启 = 内置 7 类 + 自定义规则都改写。
+// 关闭（默认）= 逐字透传；开启 = 内置指纹表 + 自定义规则都改写。
 // 覆盖 prompt.mode 清不到的通道（user / tool / reasoning）。
 func TestFingerprintRewriteEndToEnd(t *testing.T) {
 	// 严格转发契约要求 tool_call 有成对的 tool 结果（否则 400 unresolved tool calls），
