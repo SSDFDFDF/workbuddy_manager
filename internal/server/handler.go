@@ -1001,7 +1001,6 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 			if m, ok := request.Source["reasoning"].(map[string]any); ok {
 				m["effort"] = to
 			}
-			log.Printf("[effort] 档位归一 realm=%s model=%s %s -> %s", acct.Realm(), bareModel, from, to)
 		}
 		// 客户端 IP 按请求传递（PassthroughIP 开启时注入；消除共享字段竞态）。
 		attemptStarted := time.Now()
