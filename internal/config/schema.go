@@ -417,6 +417,15 @@ type GrowthAutotasks struct {
 // GrowthTaskPolicy 单个任务的自动化参数覆盖（growth.autotasks.tasks.<code>）。
 // 每一项留空 / 零值 = 用内置默认（上游下发或代码常量）。
 type GrowthTaskPolicy struct {
+	// ActionType 动作模板类型：
+	//   - "" / "builtin"：使用内置硬编码动作（未内置且无模板时回落既有行为）；
+	//   - "chat_count"：通用对话活跃上报模板（自动补足差额）；
+	//   - "model_chat"：通用指定模型真实对话打卡模板（发一次对话 + 模型活跃上报）；
+	//   - "mp_chat"：通用小程序对话上报模板（带 mp 头与 source 埋点）；
+	//   - "claim_only"：仅接受 + 达标自动领奖（不伪造任何事件）。
+	ActionType string `json:"action_type,omitempty"`
+	// Model 当 ActionType 为 "model_chat" 时指定模型 ID（如 "glm-5.2"）；空 = 缺省 "glm-5.2"。
+	Model string `json:"model,omitempty"`
 	// Gap 判据事件之间的间隔（Go 时长语法，如 "45s"）。作用于有上游反作弊
 	// 校验的连发任务（mp 对话事件、chat_5 等）；空 = 内置默认。
 	Gap string `json:"gap"`

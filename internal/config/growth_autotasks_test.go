@@ -104,6 +104,7 @@ func TestGrowthAutotasksRejectsBadValues(t *testing.T) {
 		{"mp_codes 空前缀", `{"growth":{"autotasks":{"mp_codes":["+"]}}}`, "growth.autotasks.mp_codes"},
 		{"tasks 空码", `{"growth":{"autotasks":{"tasks":{"":{}}}}}`, "growth.autotasks.tasks"},
 		{"tasks 去空白后重名", `{"growth":{"autotasks":{"tasks":{"chat_5":{}," chat_5 ":{"gap":"3s"}}}}}`, "重复的任务码"},
+		{"action_type 非法", `{"growth":{"autotasks":{"tasks":{"chat_5":{"action_type":"invalid_type"}}}}}`, "growth.autotasks.tasks.chat_5.action_type"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -94,6 +94,56 @@ func TestActionForUnknownClaim(t *testing.T) {
 	}
 }
 
+// 动态动作模板：对未内置的任务配置 action_type，能动态派生对应执行器并入待办。
+func TestActionForDynamicTemplates(t *testing.T) {
+	p := newPolicyPanel(&AutotaskPolicy{
+		Tasks: map[string]TaskOption{
+			"custom_chat_10": {
+				ActionType: "chat_count",
+				Target:     10,
+			},
+			"custom_deepseek": {
+				ActionType: "model_chat",
+				Model:      "deepseek-chat",
+			},
+			"custom_mp_act": {
+				ActionType: "mp_chat",
+				ActivityID: "summer_camp_2026",
+			},
+		},
+	})
+
+	// chat_count 动态动作
+	actChat := p.actionFor("custom_chat_10")
+	if actChat == nil || actChat.claimOnly || actChat.run == nil {
+		t.Fatalf("chat_count 模板动作生成失败: %+v", actChat)
+	}
+	if !strings.Contains(actChat.Desc, "对话活跃上报") {
+		t.Errorf("chat_count 描述不符: %s", actChat.Desc)
+	}
+
+	// model_chat 动态动作
+	actModel := p.actionFor("custom_deepseek")
+	if actModel == nil || actModel.claimOnly || actModel.run == nil {
+		t.Fatalf("model_chat 模板动作生成失败: %+v", actModel)
+	}
+	if !strings.Contains(actModel.Desc, "deepseek-chat") {
+		t.Errorf("model_chat 描述未包含模型名: %s", actModel.Desc)
+	}
+
+	// mp_chat 动态动作
+	actMP := p.actionFor("custom_mp_act")
+	if actMP == nil || actMP.claimOnly || actMP.run == nil {
+		t.Fatalf("mp_chat 模板动作生成失败: %+v", actMP)
+	}
+
+	// 动态动作不受 claimOnly 约束：即使当前进度 0/10 也应入待办队列
+	task := upstream.Task{TaskCode: "custom_chat_10", Target: 10, Current: 0}
+	if !p.growthPending(task) {
+		t.Fatal("配置了动态动作模板的任务在未达标时也应入待办队列")
+	}
+}
+
 // claimOnly 动作只在任务已达标时进入待办（避免每天白跑一轮 accept）。
 func TestGrowthPendingClaimOnly(t *testing.T) {
 	p := newPolicyPanel(&AutotaskPolicy{AllowUnknownClaim: true})
@@ -576,5 +626,55 @@ func TestAccountTaskAutoBlockedByPolicy(t *testing.T) {
 	rec = post("Some_Unknown_Task")
 	if rec.Code != http.StatusNotImplemented || !strings.Contains(rec.Body.String(), "客户端") {
 		t.Fatalf("未实现任务应 501 并提示客户端交互，got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// 任务策略保存接口：支持更新单个任务的动作模板与参数并热生效。
+func TestTasksSavePolicyEndpoint(t *testing.T) {
+	currentCfg := config.Default()
+	cfgAPI := config.NewAPI(config.APIConfig{
+		LoadConfig: func() (any, error) {
+			return currentCfg, nil
+		},
+		SaveConfig: func(raw []byte) ([]string, error) {
+			parsed, err := config.ParseConfig(raw)
+			if err != nil {
+				return nil, err
+			}
+			currentCfg = parsed
+			return []string{}, nil
+		},
+	})
+	p := New(Config{Version: "test", APIKey: "k", ConfigAPI: cfgAPI})
+	p.SetAutotaskPolicy(NewAutotaskPolicy(currentCfg))
+
+	body := strings.NewReader(`{
+		"code": "new_promo_chat",
+		"enabled": true,
+		"action_type": "chat_count",
+		"target": 8,
+		"gap": "5s"
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/panel/api/tasks/policy", body)
+	req.Header.Set("Authorization", "Bearer k")
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// 验证配置已更新
+	if currentCfg.Growth.Autotasks.Tasks["new_promo_chat"].ActionType != "chat_count" {
+		t.Fatalf("ActionType 未更新: %+v", currentCfg.Growth.Autotasks.Tasks["new_promo_chat"])
+	}
+	if currentCfg.Growth.Autotasks.Tasks["new_promo_chat"].Target != 8 {
+		t.Fatalf("Target 未更新: %+v", currentCfg.Growth.Autotasks.Tasks["new_promo_chat"])
+	}
+
+	// 验证热应用快照立即识别该任务动作
+	p.SetAutotaskPolicy(NewAutotaskPolicy(currentCfg))
+	act := p.actionFor("new_promo_chat")
+	if act == nil || act.run == nil {
+		t.Fatalf("热应用后动作未生成: %+v", act)
 	}
 }

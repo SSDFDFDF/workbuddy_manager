@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
 import { toast, ask } from '../toast';
 import { useData } from '../data';
-import type { GrowthTask } from '../types';
+import type { GrowthTask, TaskActionItem } from '../types';
 import { Dialog } from '../components/Dialog';
 import { Tag, Dots, State, Empty, Loading } from '../components/ui';
 import { btnXsPrimary, btnXs, btnPrimary, btnGhost } from '../components/buttons';
@@ -37,7 +37,17 @@ const AUTO_TASKS: Record<string, string> = {
   Sequential_Tasks_7: '体验灵感功能（预留）：灵感事件组 → 领奖',
 };
 
-function TaskRow({ t, onAct, busyCode }: { t: GrowthTask; onAct: (kind: 'accept' | 'claim' | 'auto', code: string) => void; busyCode: string | null }) {
+function TaskRow({
+  t,
+  onAct,
+  busyCode,
+  dynamicActions,
+}: {
+  t: GrowthTask;
+  onAct: (kind: 'accept' | 'claim' | 'auto', code: string) => void;
+  busyCode: string | null;
+  dynamicActions: Record<string, { desc: string; enabled: boolean }>;
+}) {
   const cur = t.current ?? 0;
   const tgt = t.target ?? 0;
   const prog = tgt ? `${cur} / ${tgt}` : tgt === 0 && cur > 0 ? String(cur) : '—';
@@ -61,6 +71,8 @@ function TaskRow({ t, onAct, busyCode }: { t: GrowthTask; onAct: (kind: 'accept'
 
   const busy = busyCode === t.task_code;
   const tip = [t.title, t.task_desc || t.description, t.jump_url ? '跳转：' + t.jump_url : ''].filter(Boolean).join('\n');
+  const dyn = dynamicActions[t.task_code];
+  const autoDesc = AUTO_TASKS[t.task_code] || (dyn?.enabled ? dyn.desc : undefined);
 
   return (
     <tr title={tip}>
@@ -79,8 +91,8 @@ function TaskRow({ t, onAct, busyCode }: { t: GrowthTask; onAct: (kind: 'accept'
           <button className={btnXsPrimary} disabled={busy} onClick={() => onAct('claim', t.task_code)}>
             {busy ? '执行中…' : '领取'}
           </button>
-        ) : AUTO_TASKS[t.task_code] ? (
-          <button className={btnXsPrimary} disabled={busy} title={AUTO_TASKS[t.task_code]} onClick={() => onAct('auto', t.task_code)}>
+        ) : autoDesc ? (
+          <button className={btnXsPrimary} disabled={busy} title={autoDesc} onClick={() => onAct('auto', t.task_code)}>
             {busy ? '执行中…' : '一键完成'}
           </button>
         ) : t.accept_status === 'accepted' ? null : (
@@ -100,6 +112,22 @@ export function TasksDialog({ uid, onClose }: { uid: string; onClose: () => void
   const [busyCode, setBusyCode] = useState<string | null>(null);
   const [acceptingAll, setAcceptingAll] = useState(false);
   const [autoAll, setAutoAll] = useState(false);
+  const [dynamicActions, setDynamicActions] = useState<Record<string, { desc: string; enabled: boolean }>>({});
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const d = await api<{ actions: TaskActionItem[] }>('tasks/actions');
+        const m: Record<string, { desc: string; enabled: boolean }> = {};
+        for (const a of d.actions || []) {
+          m[a.code] = { desc: a.desc || '', enabled: a.enabled };
+        }
+        setDynamicActions(m);
+      } catch {
+        /* 静默 */
+      }
+    })();
+  }, []);
 
   const load = useCallback(async () => {
     setError('');
@@ -239,7 +267,7 @@ export function TasksDialog({ uid, onClose }: { uid: string; onClose: () => void
           </thead>
           <tbody>
             {tasks.map((t) => (
-              <TaskRow key={t.task_code} t={t} onAct={onAct} busyCode={busyCode} />
+              <TaskRow key={t.task_code} t={t} onAct={onAct} busyCode={busyCode} dynamicActions={dynamicActions} />
             ))}
           </tbody>
         </table>

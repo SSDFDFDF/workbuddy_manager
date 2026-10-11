@@ -342,7 +342,7 @@ export function ConfigView() {
                 </div>
               )}
               <div className="mt-3 text-[11.5px] leading-relaxed text-[var(--ink-3)]">
-                逐任务参数覆盖（gap / target / attempt / window / activity_id）是结构化对象，面板表单不含它（保存时原样保留，不会被动到），请在 config.json 的 <code>growth.autotasks.tasks</code> 手工编辑，保存后热生效。
+                逐任务参数覆盖与动作模板已支持在「任务中心 → 活动自动化配置」可视化编辑；此处展示当前 <code>growth.autotasks.tasks</code> 快照，保存全局配置时原样保留。
               </div>
               {growthTasks && (
                 <pre className="mt-1.5 max-h-[160px] overflow-auto whitespace-pre-wrap rounded bg-[var(--surface)] p-2.5 font-[family-name:var(--mono)] text-[11.5px] leading-relaxed">

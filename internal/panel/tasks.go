@@ -54,6 +54,7 @@ func (p *Panel) accountTasks(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	p.recordKnownTasks(tasks)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "tasks": tasks})
 }
 

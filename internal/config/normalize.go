@@ -317,6 +317,14 @@ func (c *Config) normalizeGrowthAutotasks() error {
 	g.Tasks = trimmed
 	for name, p := range g.Tasks {
 		prefix := "growth.autotasks.tasks." + name
+		p.ActionType = strings.TrimSpace(p.ActionType)
+		switch p.ActionType {
+		case "", "builtin", "chat_count", "model_chat", "mp_chat", "claim_only":
+			// 合法模板
+		default:
+			return fmt.Errorf("%s.action_type: 未知动作模板 %q（可选：builtin, chat_count, model_chat, mp_chat, claim_only）", prefix, p.ActionType)
+		}
+		p.Model = strings.TrimSpace(p.Model)
 		p.Gap = strings.TrimSpace(p.Gap)
 		if p.Gap != "" {
 			d, err := time.ParseDuration(p.Gap)

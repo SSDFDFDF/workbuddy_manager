@@ -48,6 +48,8 @@ type AutotaskPolicy struct {
 
 // TaskOption 单个任务的参数覆盖（已解析；零值 = 用内置默认）。
 type TaskOption struct {
+	ActionType                   string
+	Model                        string
 	Gap                          time.Duration
 	Target                       int64
 	Attempt                      *bool
@@ -97,6 +99,8 @@ func NewAutotaskPolicy(cfg *config.Config) *AutotaskPolicy {
 		pol.Tasks = make(map[string]TaskOption, len(g.Tasks))
 		for code, p := range g.Tasks {
 			pol.Tasks[code] = TaskOption{
+				ActionType:     p.ActionType,
+				Model:          p.Model,
 				Gap:            p.GapDur,
 				Target:         p.Target,
 				Attempt:        p.Attempt,
@@ -121,6 +125,10 @@ func (pol *AutotaskPolicy) warnUnknownCodes() {
 	seen := map[string]bool{}
 	note := func(code string) {
 		if code == "" || seen[code] || autoActionByCode(code) != nil {
+			return
+		}
+		// 配置了自定义动作模板的任务属明确声明，不视为未知码告警
+		if opt, ok := pol.Tasks[code]; ok && opt.ActionType != "" && opt.ActionType != "builtin" {
 			return
 		}
 		seen[code] = true
@@ -189,17 +197,68 @@ func (p *Panel) actionFor(code string) *autoAction {
 	if pol.HasOnly && !pol.Only[code] {
 		return nil
 	}
+	opt := pol.Tasks[code]
+	// 1. 若配置了自定义动作模板（chat_count / model_chat / mp_chat / claim_only），优先派生对应动作
+	if opt.ActionType != "" && opt.ActionType != "builtin" {
+		if act := p.actionFromTemplate(code, opt); act != nil {
+			return act
+		}
+	}
+	// 2. 内置硬编码动作表（最高优先级预置保障）：
 	if act := autoActionByCode(code); act != nil {
 		out := *act
-		if ov, ok := pol.Tasks[code]; ok && ov.Attempt != nil {
-			out.Attempt = *ov.Attempt
+		if opt.Attempt != nil {
+			out.Attempt = *opt.Attempt
 		}
 		return &out
 	}
+	// 3. 兜底动作（未内置且未配模板，策略允许时做 accept + 达标领奖）：
 	if pol.AllowUnknownClaim && plausibleTaskCode(code) {
 		return p.claimOnlyAction(code)
 	}
 	return nil
+}
+
+// actionFromTemplate 根据配置的动作模板动态生成动作执行器。
+func (p *Panel) actionFromTemplate(code string, opt TaskOption) *autoAction {
+	attempt := opt.Attempt != nil && *opt.Attempt
+	switch opt.ActionType {
+	case "chat_count":
+		return &autoAction{
+			TaskCode: code,
+			Desc:     "通用对话活跃上报模板（自动补足差额）",
+			Attempt:  attempt,
+			run: func(p *Panel, a *auth.Auth) (string, error) {
+				return p.runDynamicChatCount(a, code)
+			},
+		}
+	case "model_chat":
+		model := opt.Model
+		if model == "" {
+			model = "glm-5.2"
+		}
+		return &autoAction{
+			TaskCode: code,
+			Desc:     fmt.Sprintf("通用模型对话打卡模板（模型：%s）", model),
+			Attempt:  attempt,
+			run: func(p *Panel, a *auth.Auth) (string, error) {
+				return p.runDynamicModelChat(a, code, model)
+			},
+		}
+	case "mp_chat":
+		return &autoAction{
+			TaskCode: code,
+			Desc:     "通用小程序对话上报模板",
+			Attempt:  attempt,
+			run: func(p *Panel, a *auth.Auth) (string, error) {
+				return p.runDynamicMPChat(a, code)
+			},
+		}
+	case "claim_only":
+		return p.claimOnlyAction(code)
+	default:
+		return nil
+	}
 }
 
 // actions 返回策略过滤后的内置动作表（按策略顺序，供「一键完成」遍历）。
@@ -229,6 +288,13 @@ func (p *Panel) orderedCodes() []string {
 		if !placed[act.TaskCode] {
 			placed[act.TaskCode] = true
 			out = append(out, act.TaskCode)
+		}
+	}
+	// 配置了自定义模板动作的任务也排入顺序列表
+	for code, opt := range pol.Tasks {
+		if opt.ActionType != "" && opt.ActionType != "builtin" && !placed[code] {
+			placed[code] = true
+			out = append(out, code)
 		}
 	}
 	return out

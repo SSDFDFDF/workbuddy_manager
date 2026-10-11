@@ -15,10 +15,12 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"workbuddy_manager/internal/auth"
+	"workbuddy_manager/internal/config"
 	"workbuddy_manager/internal/upstream"
 )
 
@@ -87,6 +89,7 @@ func (p *Panel) pendingGrowthTasks(a *auth.Auth) ([]upstream.Task, error) {
 	// 两次列表都成功时顺手记录差集（= mp 专属码），供 isMPTaskCode 运行时识别。
 	if mpTasks, mpErr := p.cfg.Upstream.ListTasksMP(a); mpErr == nil {
 		p.noteMPDetected(mpExclusiveCodes(tasks, mpTasks))
+		p.recordKnownTasks(mpTasks)
 		for _, t := range mpTasks {
 			if p.growthPending(t) && !seen[t.TaskCode] {
 				pending = append(pending, t)
@@ -94,6 +97,7 @@ func (p *Panel) pendingGrowthTasks(a *auth.Auth) ([]upstream.Task, error) {
 			}
 		}
 	}
+	p.recordKnownTasks(tasks)
 	return pending, nil
 }
 
@@ -471,30 +475,142 @@ func (p *Panel) runGrowthQueued(a *auth.Auth, code string) (string, error) {
 // tasksActions 列出内置自动化动作与当前策略下的启用状态（供面板「任务中心 / 配置
 // 页」展示可配置的任务码；代码是注册表的唯一真相，前端不硬编码清单）。
 type taskActionInfo struct {
-	Code    string `json:"code"`
-	Desc    string `json:"desc,omitempty"`
-	Attempt bool   `json:"attempt,omitempty"`
-	Enabled bool   `json:"enabled"`
-	MP      bool   `json:"mp,omitempty"`
+	Code         string `json:"code"`
+	Title        string `json:"title,omitempty"`
+	Desc         string `json:"desc,omitempty"`
+	Attempt      bool   `json:"attempt,omitempty"`
+	Enabled      bool   `json:"enabled"`
+	MP           bool   `json:"mp,omitempty"`
+	Builtin      bool   `json:"builtin"`
+	ActionType   string `json:"action_type,omitempty"`
+	Model        string `json:"model,omitempty"`
+	Gap          string `json:"gap,omitempty"`
+	Target       int64  `json:"target,omitempty"`
+	Window       string `json:"window,omitempty"`
+	ActivityID   string `json:"activity_id,omitempty"`
+	Unconfigured bool   `json:"unconfigured,omitempty"`
 }
 
 func (p *Panel) tasksActions(w http.ResponseWriter, r *http.Request) {
 	pol := p.autotaskPolicy()
 	out := make([]taskActionInfo, 0, len(autoActions))
+	seen := map[string]bool{}
+
+	// 1. 内置硬编码动作表（按排序列表输出）
 	for _, code := range p.orderedCodes() {
 		base := autoActionByCode(code)
 		if base == nil {
 			continue
 		}
+		seen[code] = true
 		act := p.actionFor(code)
+		opt := pol.Tasks[code]
+		title := ""
+		if kt, ok := p.getKnownTask(code); ok && kt.Title != "" {
+			title = kt.Title
+		}
+		actionType := opt.ActionType
+		if actionType == "" {
+			actionType = "builtin"
+		}
+		gapStr := ""
+		if opt.Gap > 0 {
+			gapStr = opt.Gap.String()
+		}
+		windowStr := ""
+		if opt.HasWindow {
+			windowStr = fmt.Sprintf("%02d:%02d-%02d:%02d", opt.WindowStartMin/60, opt.WindowStartMin%60, opt.WindowEndMin/60, opt.WindowEndMin%60)
+		}
 		out = append(out, taskActionInfo{
-			Code:    code,
-			Desc:    base.Desc,
-			Attempt: act != nil && act.Attempt,
-			Enabled: act != nil,
-			MP:      p.isMPTaskCode(code),
+			Code:       code,
+			Title:      title,
+			Desc:       base.Desc,
+			Attempt:    act != nil && act.Attempt,
+			Enabled:    act != nil,
+			MP:         p.isMPTaskCode(code),
+			Builtin:    true,
+			ActionType: actionType,
+			Model:      opt.Model,
+			Gap:        gapStr,
+			Target:     opt.Target,
+			Window:     windowStr,
+			ActivityID: opt.ActivityID,
 		})
 	}
+
+	// 2. 配置了自定义动作模板的任务（不在 autoActions 中）
+	for code, opt := range pol.Tasks {
+		if seen[code] {
+			continue
+		}
+		seen[code] = true
+		act := p.actionFor(code)
+		title := ""
+		desc := ""
+		if kt, ok := p.getKnownTask(code); ok {
+			title = kt.Title
+			desc = kt.TaskDesc
+			if desc == "" {
+				desc = kt.Description
+			}
+		}
+		if desc == "" && act != nil {
+			desc = act.Desc
+		}
+		gapStr := ""
+		if opt.Gap > 0 {
+			gapStr = opt.Gap.String()
+		}
+		windowStr := ""
+		if opt.HasWindow {
+			windowStr = fmt.Sprintf("%02d:%02d-%02d:%02d", opt.WindowStartMin/60, opt.WindowStartMin%60, opt.WindowEndMin/60, opt.WindowEndMin%60)
+		}
+		out = append(out, taskActionInfo{
+			Code:       code,
+			Title:      title,
+			Desc:       desc,
+			Attempt:    act != nil && act.Attempt,
+			Enabled:    act != nil,
+			MP:         p.isMPTaskCode(code),
+			Builtin:    false,
+			ActionType: opt.ActionType,
+			Model:      opt.Model,
+			Gap:        gapStr,
+			Target:     opt.Target,
+			Window:     windowStr,
+			ActivityID: opt.ActivityID,
+		})
+	}
+
+	// 3. 运行时探测/扫描发现但尚未配置动作的任务
+	p.knownTasksMu.RLock()
+	var unconfigured []upstream.Task
+	for code, t := range p.knownTasks {
+		if !seen[code] {
+			unconfigured = append(unconfigured, t)
+		}
+	}
+	p.knownTasksMu.RUnlock()
+	sort.Slice(unconfigured, func(i, j int) bool {
+		return unconfigured[i].TaskCode < unconfigured[j].TaskCode
+	})
+	for _, t := range unconfigured {
+		desc := t.TaskDesc
+		if desc == "" {
+			desc = t.Description
+		}
+		out = append(out, taskActionInfo{
+			Code:         t.TaskCode,
+			Title:        t.Title,
+			Desc:         desc,
+			Enabled:      false,
+			MP:           p.isMPTaskCode(t.TaskCode),
+			Builtin:      false,
+			ActionType:   "",
+			Unconfigured: true,
+		})
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":      true,
 		"actions": out,
@@ -504,6 +620,124 @@ func (p *Panel) tasksActions(w http.ResponseWriter, r *http.Request) {
 			"mp_override":         pol.MPOverride,
 		},
 	})
+}
+
+// tasksSavePolicy 更新单个任务的自动化策略并热应用落盘。
+func (p *Panel) tasksSavePolicy(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.ConfigAPI == nil {
+		writeErr(w, http.StatusNotImplemented, "config api not available")
+		return
+	}
+	var body struct {
+		Code       string `json:"code"`
+		Enabled    *bool  `json:"enabled,omitempty"`
+		MP         *bool  `json:"mp,omitempty"`
+		ActionType string `json:"action_type,omitempty"`
+		Model      string `json:"model,omitempty"`
+		Gap        string `json:"gap,omitempty"`
+		Target     int64  `json:"target,omitempty"`
+		Window     string `json:"window,omitempty"`
+		ActivityID string `json:"activity_id,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json body: "+err.Error())
+		return
+	}
+	code := strings.TrimSpace(body.Code)
+	if code == "" {
+		writeErr(w, http.StatusBadRequest, "task code required")
+		return
+	}
+
+	_, err := p.cfg.ConfigAPI.UpdateGrowthAutotasks(func(g *config.GrowthAutotasks) error {
+		if g.Tasks == nil {
+			g.Tasks = make(map[string]config.GrowthTaskPolicy)
+		}
+		curr := g.Tasks[code]
+		if body.ActionType != "" {
+			curr.ActionType = strings.TrimSpace(body.ActionType)
+		}
+		if body.Model != "" || body.ActionType == "model_chat" {
+			curr.Model = strings.TrimSpace(body.Model)
+		}
+		curr.Gap = strings.TrimSpace(body.Gap)
+		curr.Target = body.Target
+		curr.Window = strings.TrimSpace(body.Window)
+		curr.ActivityID = strings.TrimSpace(body.ActivityID)
+		g.Tasks[code] = curr
+
+		// 处理 Enabled 开关
+		if body.Enabled != nil {
+			if *body.Enabled {
+				// 从 Disabled 中移除
+				var newDisabled []string
+				for _, c := range g.Disabled {
+					if c != code {
+						newDisabled = append(newDisabled, c)
+					}
+				}
+				g.Disabled = newDisabled
+				// 若有白名单且不在白名单中，追加进白名单
+				if len(g.Only) > 0 {
+					has := false
+					for _, c := range g.Only {
+						if c == code {
+							has = true
+							break
+						}
+					}
+					if !has {
+						g.Only = append(g.Only, code)
+					}
+				}
+			} else {
+				// 禁用：加入 Disabled
+				has := false
+				for _, c := range g.Disabled {
+					if c == code {
+						has = true
+						break
+					}
+				}
+				if !has {
+					g.Disabled = append(g.Disabled, code)
+				}
+			}
+		}
+
+		// 处理 MP 开关
+		if body.MP != nil {
+			if *body.MP {
+				has := false
+				for _, c := range g.MPCodes {
+					trimmed := strings.TrimPrefix(c, "+")
+					if trimmed == code {
+						has = true
+						break
+					}
+				}
+				if !has {
+					g.MPCodes = append(g.MPCodes, "+"+code)
+				}
+			} else {
+				var newMP []string
+				for _, c := range g.MPCodes {
+					trimmed := strings.TrimPrefix(c, "+")
+					if trimmed != code {
+						newMP = append(newMP, c)
+					}
+				}
+				g.MPCodes = newMP
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	log.Printf("panel: 任务策略已更新 code=%s action=%s", code, body.ActionType)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "任务配置已更新并热生效"})
 }
 
 // tasksQueueStatus 队列状态（轮询用）。

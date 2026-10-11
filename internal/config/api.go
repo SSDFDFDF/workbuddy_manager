@@ -12,6 +12,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -122,6 +123,36 @@ func (a *API) save(w http.ResponseWriter, r *http.Request) {
 		"ok":               true,
 		"restart_required": restartRequired,
 	})
+}
+
+// UpdateGrowthAutotasks 更新成长任务配置并热保存落盘。
+func (a *API) UpdateGrowthAutotasks(fn func(g *GrowthAutotasks) error) ([]string, error) {
+	if a == nil || a.cfg.LoadConfig == nil || a.cfg.SaveConfig == nil {
+		return nil, fmt.Errorf("config api not available")
+	}
+	cfgAny, err := a.cfg.LoadConfig()
+	if err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
+	}
+	cfg, ok := cfgAny.(*Config)
+	if !ok {
+		raw, err := json.Marshal(cfgAny)
+		if err != nil {
+			return nil, err
+		}
+		cfg = &Config{}
+		if err := json.Unmarshal(raw, cfg); err != nil {
+			return nil, err
+		}
+	}
+	if err := fn(&cfg.Growth.Autotasks); err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return a.cfg.SaveConfig(raw)
 }
 
 // preview 解析草稿的 prompt 段并返回各域生效规则（不落盘）。

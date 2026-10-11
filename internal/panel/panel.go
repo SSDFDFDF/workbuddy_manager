@@ -115,6 +115,35 @@ type Panel struct {
 	mpMu         sync.Mutex
 	mpDetected   map[string]bool
 	mpDetectedAt time.Time
+
+	// knownTasks 运行时发现并记录的上游成长任务元数据（全量目录与标题展示）
+	knownTasksMu sync.RWMutex
+	knownTasks   map[string]upstream.Task
+}
+
+// recordKnownTasks 记录上游返回的任务元数据（扫描/查询时自动并入）。
+func (p *Panel) recordKnownTasks(tasks []upstream.Task) {
+	if len(tasks) == 0 {
+		return
+	}
+	p.knownTasksMu.Lock()
+	defer p.knownTasksMu.Unlock()
+	if p.knownTasks == nil {
+		p.knownTasks = make(map[string]upstream.Task)
+	}
+	for _, t := range tasks {
+		if t.TaskCode != "" {
+			p.knownTasks[t.TaskCode] = t
+		}
+	}
+}
+
+// getKnownTask 获取已记录的任务元数据。
+func (p *Panel) getKnownTask(code string) (upstream.Task, bool) {
+	p.knownTasksMu.RLock()
+	defer p.knownTasksMu.RUnlock()
+	t, ok := p.knownTasks[code]
+	return t, ok
 }
 
 // tryLockAccount 尝试锁定账号的任务执行；已在执行返回 false。
@@ -174,11 +203,12 @@ func New(cfg Config) *Panel {
 		base = dt.Clone()
 	}
 	p := &Panel{
-		cfg:     cfg,
-		mux:     http.NewServeMux(),
-		started: time.Now(),
-		logs:    NewRing(500),
-		logins:  map[string]loginSession{},
+		cfg:        cfg,
+		mux:        http.NewServeMux(),
+		started:    time.Now(),
+		logs:       NewRing(500),
+		logins:     map[string]loginSession{},
+		knownTasks: make(map[string]upstream.Task),
 	}
 	dir := cfg.AuthDir
 	p.authDir.Store(&dir)
@@ -261,6 +291,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto_all", p.withAuth(p.accountTaskAutoAll))
 	p.mux.HandleFunc("POST /panel/api/tasks/scan_all", p.withAuth(p.tasksScanAll))
 	p.mux.HandleFunc("GET /panel/api/tasks/actions", p.withAuth(p.tasksActions))
+	p.mux.HandleFunc("POST /panel/api/tasks/policy", p.withAuth(p.tasksSavePolicy))
 	p.mux.HandleFunc("POST /panel/api/tasks/run_queue", p.withAuth(p.tasksRunQueue))
 	p.mux.HandleFunc("GET /panel/api/tasks/queue", p.withAuth(p.tasksQueueStatus))
 	p.mux.HandleFunc("GET /panel/api/school/vouchers", p.withAuth(p.schoolVouchers))

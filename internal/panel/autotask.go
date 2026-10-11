@@ -1328,3 +1328,90 @@ func (p *Panel) accountTaskAutoAll(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusGatewayTimeout, "执行超时（任务仍在后台继续）")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 动态动作模板执行器（通用对话补足 / 模型打卡 / 小程序对话）
+// ---------------------------------------------------------------------------
+
+// runDynamicChatCount 通用对话活跃上报模板实现：accept -> 补足 chat_request_send（领奖由外层管线统一收敛）。
+func (p *Panel) runDynamicChatCount(a *auth.Auth, code string) (string, error) {
+	mp := p.isMPTaskCode(code)
+	t, err := p.taskByCode(a, code)
+	if err != nil {
+		return "", err
+	}
+	if t == nil {
+		return "该账号无此任务", nil
+	}
+	if t.Claimed {
+		return "已领取", nil
+	}
+	if t.AcceptStatus == "not_accepted" || t.AcceptStatus == "" {
+		_ = p.acceptTask(a, code, mp)
+	}
+	target := p.targetFor(code, t.Target)
+	if target <= 0 {
+		target = 1
+	}
+	need := target - t.Current
+	if need <= 0 {
+		return "进度已达标", nil
+	}
+	gap := p.gapFor(code, reportGap)
+	for i := int64(0); i < need; i++ {
+		cid := fmt.Sprintf("workbuddy_manager-dyn-%d-%d", time.Now().UnixMilli(), i)
+		if err := p.cfg.Upstream.ReportChatActivity(a, cid, ""); err != nil {
+			return fmt.Sprintf("上报第 %d/%d 条失败: %v", i+1, need, err), nil
+		}
+		if i < need-1 {
+			time.Sleep(gap)
+		}
+	}
+	return fmt.Sprintf("已补报 %d 条对话事件", need), nil
+}
+
+// runDynamicModelChat 通用指定模型真实对话打卡模板实现：accept -> 指定模型对话 -> 上报（领奖由外层管线统一收敛）。
+func (p *Panel) runDynamicModelChat(a *auth.Auth, code, modelID string) (string, error) {
+	mp := p.isMPTaskCode(code)
+	t, err := p.taskByCode(a, code)
+	if err != nil {
+		return "", err
+	}
+	if t == nil {
+		return "该账号无此任务", nil
+	}
+	if t.Claimed {
+		return "已领取", nil
+	}
+	if t.AcceptStatus == "not_accepted" || t.AcceptStatus == "" {
+		_ = p.acceptTask(a, code, mp)
+	}
+	time.Sleep(reportGap)
+	body, _ := json.Marshal(map[string]any{
+		"model": modelID,
+		"messages": []map[string]any{
+			{"role": "user", "content": "hi，请回复一句话"},
+		},
+		"stream": true,
+	})
+	rc, status, respBody, err := p.cfg.Upstream.ChatStream(a, body, "", upstream.ChatMeta{})
+	if err != nil {
+		return "", fmt.Errorf("对话请求: %w", err)
+	}
+	if status >= 400 {
+		rc.Close()
+		return "", fmt.Errorf("对话失败 http=%d: %s", status, truncateStr(string(respBody), 160))
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(rc, 1<<20))
+	rc.Close()
+	time.Sleep(reportGap)
+	if err := p.cfg.Upstream.ReportChatActivityModel(a, fmt.Sprintf("workbuddy_manager-dyn-model-%d", time.Now().UnixMilli()), "", modelID, modelID); err != nil {
+		return "对话已完成，但进度上报失败：" + err.Error(), nil
+	}
+	return fmt.Sprintf("已完成 %s 对话并上报", modelID), nil
+}
+
+// runDynamicMPChat 通用小程序对话模板实现：直接复用 runMPMiniChatTask。
+func (p *Panel) runDynamicMPChat(a *auth.Auth, code string) (string, error) {
+	return p.runMPMiniChatTask(a, code, p.activityIDFor(code) != "")
+}

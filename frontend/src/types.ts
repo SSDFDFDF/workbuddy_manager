@@ -225,6 +225,35 @@ export interface QueueStatus {
   items?: QueueItem[];
 }
 
+export interface TaskActionItem {
+  code: string;
+  title?: string;
+  desc?: string;
+  attempt?: boolean;
+  enabled: boolean;
+  mp?: boolean;
+  builtin?: boolean;
+  action_type?: string;
+  model?: string;
+  gap?: string;
+  target?: number;
+  window?: string;
+  activity_id?: string;
+  unconfigured?: boolean;
+}
+
+export interface TaskPolicyUpdate {
+  code: string;
+  enabled?: boolean;
+  mp?: boolean;
+  action_type?: string;
+  model?: string;
+  gap?: string;
+  target?: number;
+  window?: string;
+  activity_id?: string;
+}
+
 export interface ScanAccount {
   uid: string;
   nickname?: string;
