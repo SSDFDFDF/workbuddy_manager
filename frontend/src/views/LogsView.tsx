@@ -2,7 +2,7 @@
    - 顶部双 Tab 切换：【请求记录】（详细请求指标、来源、Token 读/取/缓存深度透视）与【运行日志】（按频道过滤的控制台日志流）
    - Token 维度全覆盖：提示词读入 (Prompt Tokens)、模型输出提取 (Completion Tokens)、上下文缓存命中 (Cache Hit)、缓存未命中 (Cache Miss)、缓存命中率等。
 */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
 import { useTimeRange, TimeRangeControl } from '../components/TimeRange';
 import { Tag, Empty, Pager } from '../components/ui';
@@ -687,9 +687,9 @@ export function LogsView() {
                     const hasMiss = missTok > 0;
 
                     return (
-                      <tr
-                        key={rowKey}
-                        className={
+                      <Fragment key={rowKey}>
+                        <tr
+                          className={
                           'group cursor-pointer transition-colors hover:bg-[var(--surface-2)]/60 ' +
                           (isExpanded ? 'bg-[var(--surface-2)]/40' : '')
                         }
@@ -810,23 +810,18 @@ export function LogsView() {
                           </button>
                         </td>
                       </tr>
-                    );
-                  })}
+                      {isExpanded && (
+                        <tr key={`exp-${rowKey}`}>
+                          <td colSpan={REQ_COLS} className="p-0">
+                            <RequestDetailRow e={e} onCopy={handleCopy} />
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  );
+                })}
 
-                  {/* 展开详情卡片行 */}
-                  {pagedReqs.map((e, i) => {
-                    const rowKey = e.request_id || `${e.time}-${i}`;
-                    if (expandedId !== rowKey) return null;
-                    return (
-                      <tr key={`exp-${rowKey}`}>
-                        <td colSpan={REQ_COLS} className="p-0">
-                          <RequestDetailRow e={e} onCopy={handleCopy} />
-                        </td>
-                      </tr>
-                    );
-                  })}
-
-                  {!reqFiltered.length && (
+                {!reqFiltered.length && (
                     <tr>
                       <td colSpan={REQ_COLS}>
                         <Empty>{reqRows?.length ? '没有符合当前筛选条件的请求记录' : '暂无请求记录'}</Empty>
