@@ -99,7 +99,7 @@ func TestUnsupportedNamespacesFailBeforeUpstream(t *testing.T) {
 	up := newFakeUpstream(t, func(string) (int, string, bool) { attempts++; return 200, "", false })
 	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "a", AccessToken: "a", ExpiresAt: 9999999999}), Upstream: up})
 	for _, group := range []string{
-		`{"type":"namespace","name":"crm","description":"must retain group rules","tools":[{"type":"function","name":"f","parameters":{"type":"object"},"strict":false}]}`,
+		`{"type":"namespace","name":"crm","description":"","tools":[]}`,
 		`{"type":"namespace","name":"crm","description":"","tools":[{"type":"custom","name":"f"}]}`,
 	} {
 		rec := httptest.NewRecorder()

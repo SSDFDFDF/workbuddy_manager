@@ -55,13 +55,9 @@ func TestNamespaceDeclarationsChoiceAndHistory(t *testing.T) {
 
 func TestNamespaceRejectedSemantics(t *testing.T) {
 	for _, tools := range []string{
-		strings.Replace(nsTools, `"description":""`, `"description":"group rules"`, 1),
 		strings.Replace(nsTools, `"name":"crm"`, `"name":"crm.x"`, 1),
 		strings.Replace(nsTools, `"name":"crm"`, `"name":"中文"`, 1),
 		strings.Replace(nsTools, `"name":"lookup"`, `"name":"`+strings.Repeat("x", 65)+`"`, 1),
-		strings.Replace(nsTools, `"strict":false`, `"strict":true`, 1),
-		strings.Replace(nsTools, `"strict":false`, `"defer_loading":true,"strict":false`, 1),
-		strings.Replace(nsTools, `"strict":false`, `"async":false,"strict":false`, 1),
 		strings.Replace(nsTools, `"type":"function"`, `"type":"custom"`, 1),
 		strings.Replace(nsTools, `"type":"function"`, `"type":"namespace"`, 1),
 		strings.Replace(nsTools, nsFunction, "", 1),
@@ -93,12 +89,16 @@ func TestNamespaceRejectedSemantics(t *testing.T) {
 }
 
 func TestNamespaceOptionalDescriptionAndStrict(t *testing.T) {
-	// Omitting description/strict follows the official defaults; dropping an
-	// empty description loses nothing, and strict:false still means the same.
+	// Omitting description/strict follows the official defaults; non-empty
+	// descriptions, strict:true, defer_loading and async are accepted and dropped.
 	for _, tools := range []string{
 		strings.Replace(nsTools, `,"description":""`, ``, 1),
 		strings.Replace(nsTools, `"description":""`, `"description":null`, 1),
+		strings.Replace(nsTools, `"description":""`, `"description":"group rules"`, 1),
 		strings.Replace(nsTools, `,"strict":false`, ``, 1),
+		strings.Replace(nsTools, `"strict":false`, `"strict":true`, 1),
+		strings.Replace(nsTools, `"strict":false`, `"defer_loading":true,"strict":false`, 1),
+		strings.Replace(nsTools, `"strict":false`, `"async":false,"strict":false`, 1),
 	} {
 		r := mustDecode(t, Responses, `{"model":"x","store":false,"input":"hi","tools":`+tools+`}`)
 		if r.tools.byChat["ns_3_crm_lookup"] != (toolIdentity{name: "lookup", namespace: "crm"}) {

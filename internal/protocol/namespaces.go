@@ -70,15 +70,20 @@ func (idx *toolIndex) claim(id toolIdentity, path string) (string, error) {
 	return alias, nil
 }
 
-func (idx *toolIndex) add(m map[string]any, namespace, path string) (map[string]any, error) {
-	if err := fields(m, path, "type name description parameters strict"); err != nil {
-		return nil, err
+func (idx *toolIndex) add(m map[string]any, namespace, path string, dropped *[]string) (map[string]any, error) {
+	ignored, _ := fieldsAccept(m, path, "type name description parameters strict", "*")
+	if dropped != nil {
+		for _, k := range ignored {
+			*dropped = append(*dropped, path+"."+k)
+		}
 	}
 	if m["type"] != "function" {
 		return nil, invalid(path+".type", "only client function tools are supported")
 	}
-	if err := optionalFalse(m, "strict"); err != nil {
-		return nil, invalid(path+".strict", "strict:true is not supported; schema-constrained generation is not verified")
+	if v, ok := m["strict"].(bool); ok && v {
+		if dropped != nil {
+			*dropped = append(*dropped, path+".strict")
+		}
 	}
 	t, err := function(m["name"], m["description"], m["parameters"], path)
 	if err != nil {
@@ -99,7 +104,7 @@ func (idx *toolIndex) add(m map[string]any, namespace, path string) (map[string]
 	return t, nil
 }
 
-func (idx *toolIndex) declarations(v any) ([]any, error) {
+func (idx *toolIndex) declarations(v any, dropped *[]string) ([]any, error) {
 	a, ok := v.([]any)
 	if !ok {
 		return nil, invalid("tools", "array required")
@@ -113,15 +118,18 @@ func (idx *toolIndex) declarations(v any) ([]any, error) {
 			return nil, err
 		}
 		if m["type"] != "namespace" {
-			t, err := idx.add(m, "", p)
+			t, err := idx.add(m, "", p, dropped)
 			if err != nil {
 				return nil, err
 			}
 			out = append(out, t)
 			continue
 		}
-		if err := fields(m, p, "type name description tools"); err != nil {
-			return nil, err
+		ignored, _ := fieldsAccept(m, p, "type name description tools", "*")
+		if dropped != nil {
+			for _, k := range ignored {
+				*dropped = append(*dropped, p+"."+k)
+			}
 		}
 		ns, err := nonempty(m["name"], p+".name")
 		if err != nil {
@@ -132,7 +140,12 @@ func (idx *toolIndex) declarations(v any) ([]any, error) {
 		}
 		namespaces[ns] = true
 		if v := m["description"]; v != nil && v != "" {
-			return nil, invalid(p+".description", "group instructions cannot be represented by Chat; omit the description or use an empty string")
+			if _, ok := v.(string); !ok {
+				return nil, invalid(p+".description", "string required")
+			}
+			if dropped != nil {
+				*dropped = append(*dropped, p+".description")
+			}
 		}
 		children, ok := m["tools"].([]any)
 		if !ok || len(children) == 0 {
@@ -144,7 +157,7 @@ func (idx *toolIndex) declarations(v any) ([]any, error) {
 			if err != nil {
 				return nil, err
 			}
-			t, err := idx.add(m, ns, cp)
+			t, err := idx.add(m, ns, cp, dropped)
 			if err != nil {
 				return nil, err
 			}

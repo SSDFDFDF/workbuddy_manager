@@ -61,9 +61,7 @@ func TestUnsupportedAndInvalidRequests(t *testing.T) {
 		kind        Kind
 		body, param string
 	}{
-		{Responses, `{"model":"x","store":true,"input":"hi"}`, "store"},
 		{Responses, `{"model":"x","store":false,"input":"hi","previous_response_id":"resp_x"}`, "previous_response_id"},
-		{Responses, `{"model":"x","store":false,"input":"hi","background":true}`, "background"},
 		{Responses, `{"model":"x","store":false,"input":"hi","reasoning":{"effort":""}}`, "reasoning.effort"},
 		{Responses, `{"model":"x","store":false,"input":"hi","reasoning":{"effort":7}}`, "reasoning.effort"},
 		{Responses, `{"model":"x","store":false,"input":"hi","truncation":"always"}`, "truncation"},
@@ -72,9 +70,7 @@ func TestUnsupportedAndInvalidRequests(t *testing.T) {
 		{Responses, `{"model":"x","store":false,"input":"hi","text":{"format":{"type":"json_object"}}}`, "text.format"},
 		{Responses, `{"model":"x","store":false,"input":[{"role":"user","content":[{"type":"input_image","image_url":"http://x"}]}]}`, "input"},
 		{Responses, `{"model":"x","store":false,"input":[{"type":"function_call_output","call_id":"missing","output":"ok"}]}`, "tool_call_id"},
-		{Responses, `{"model":"x","store":false,"input":"hi","unexpected":false}`, "unexpected"},
 		{Responses, `{"model":"x","store":false,"input":"hi","temperature":3}`, "temperature"},
-		{Responses, `{"model":"x","store":false,"input":"hi","n":2}`, "n"},
 		{Responses, `{"model":"x","model":"y","store":false,"input":"hi"}`, "duplicate"},
 		{Anthropic, `{"model":"x","messages":[{"role":"user","content":"hi"}]}`, "max_tokens"},
 		{Anthropic, `{"model":"x","max_tokens":1,"messages":[{"role":"system","content":"hi"}]}`, "role"},
@@ -96,18 +92,23 @@ func TestUnsupportedAndInvalidRequests(t *testing.T) {
 }
 
 func TestRelaxedDefaultsAccepted(t *testing.T) {
-	// Omitted store and omitted tool strict follow the official defaults
-	// (true is still rejected for store; strict:true is still rejected).
+	// store:true, background:true, strict:true, unknown fields are accepted and dropped.
 	r := mustDecode(t, Responses, `{"model":"x","input":"hi","tools":[{"type":"function","name":"f","parameters":{"type":"object"}}]}`)
 	if tools := r.Chat.Object["tools"].([]any); len(tools) != 1 {
 		t.Fatal(tools)
 	}
 	for _, body := range []string{
 		`{"model":"x","store":true,"input":"hi"}`,
+		`{"model":"x","store":false,"background":true,"input":"hi"}`,
+		`{"model":"x","store":false,"input":"hi","unexpected":false,"n":2}`,
 		`{"model":"x","store":false,"input":"hi","tools":[{"type":"function","name":"f","parameters":{"type":"object"},"strict":true}]}`,
 	} {
-		if _, err := Decode(Responses, []byte(body)); err == nil {
-			t.Fatalf("accepted %s", body)
+		req, err := Decode(Responses, []byte(body))
+		if err != nil {
+			t.Fatalf("rejected %s: %v", body, err)
+		}
+		if len(req.Dropped) == 0 {
+			t.Fatalf("expected dropped fields for %s", body)
 		}
 	}
 }
@@ -175,6 +176,21 @@ func TestResponsesReasoningHistoryDropped(t *testing.T) {
 	}
 	if !containsString(r.Dropped, "input[0]") {
 		t.Fatalf("dropped list missing reasoning item: %v", r.Dropped)
+	}
+}
+
+func TestUnknownInputAndBlockTypesDropped(t *testing.T) {
+	resp := mustDecode(t, Responses, `{"model":"x","store":true,"input":[{"type":"item_reference","id":"ref_1"},{"role":"user","content":"hi"}]}`)
+	if !containsString(resp.Dropped, "input[0]") || !containsString(resp.Dropped, "store") {
+		t.Fatalf("expected dropped unknown input/store: %v", resp.Dropped)
+	}
+
+	ant := mustDecode(t, Anthropic, `{"model":"x","max_tokens":1,"custom_field":"val",`+
+		`"tools":[{"name":"f","input_schema":{"type":"object"},"strict":true,"defer_loading":true}],`+
+		`"messages":[{"role":"user","content":[{"type":"custom_block","data":"x"},{"type":"text","text":"hi"}]}]}`)
+	if !containsString(ant.Dropped, "custom_field") || !containsString(ant.Dropped, "tools[0].strict") ||
+		!containsString(ant.Dropped, "tools[0].defer_loading") || !containsString(ant.Dropped, "messages[0].content[0]") {
+		t.Fatalf("expected dropped anthropic fields: %v", ant.Dropped)
 	}
 }
 

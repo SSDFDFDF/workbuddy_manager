@@ -13,10 +13,7 @@ func responsesRequest(src map[string]any, tools *toolIndex, dropped *[]string) (
 	// prompt_cache_key 级，pi-ai/Codex 类客户端把会话 ID 放这里而非 conversation
 	// 维度）。在“忽略”之前把它提升为 Chat 顶层字段，forwarding.Parse 会照常校验
 	// 并落到 Request.PromptCacheKey——否则跨协议请求丢键，同会话每笔独立轮换。
-	ignored, err := fieldsAccept(src, "", "model input instructions stream store previous_response_id conversation background tools tool_choice parallel_tool_calls max_output_tokens temperature top_p metadata text reasoning include truncation", "client_metadata service_tier prompt_cache_key stream_options safety_identifier top_logprobs")
-	if err != nil {
-		return nil, err
-	}
+	ignored, _ := fieldsAccept(src, "", "model input instructions stream store previous_response_id conversation background tools tool_choice parallel_tool_calls max_output_tokens temperature top_p metadata text reasoning include truncation", "*")
 	// prompt_cache_key 从“被忽略”名单除名（提升为路由线索，见下方 dst 构造处）；
 	// 必须在 *dropped append 之前完成，否则归档事件仍把它记成丢弃。
 	if v, ok := src["prompt_cache_key"].(string); ok && v != "" {
@@ -28,19 +25,16 @@ func responsesRequest(src map[string]any, tools *toolIndex, dropped *[]string) (
 		}
 	}
 	*dropped = append(*dropped, ignored...)
-	// The official default is true, but the gateway is stateless: omission/null
-	// means the client does not rely on retrieval, while an explicit true would
-	// falsely acknowledge persistence that does not exist.
-	if err := optionalFalse(src, "store"); err != nil {
-		return nil, invalid("store", "only false or omission is supported; response storage is not implemented")
+	if v, ok := src["store"].(bool); ok && v {
+		*dropped = append(*dropped, "store")
 	}
 	for _, k := range []string{"previous_response_id", "conversation"} {
 		if src[k] != nil {
 			return nil, invalid(k, "server-side conversation state is not implemented; send complete input history")
 		}
 	}
-	if err := optionalFalse(src, "background"); err != nil {
-		return nil, err
+	if v, ok := src["background"].(bool); ok && v {
+		*dropped = append(*dropped, "background")
 	}
 	if v := src["truncation"]; v != nil {
 		s, err := stringValue(v, "truncation")
@@ -170,7 +164,7 @@ func responsesRequest(src map[string]any, tools *toolIndex, dropped *[]string) (
 		// Client metadata is echoed only, not interpreted as WorkBuddy routing.
 	}
 	if v := src["tools"]; v != nil {
-		declared, err := tools.declarations(v)
+		declared, err := tools.declarations(v, dropped)
 		if err != nil {
 			return nil, err
 		}
@@ -324,7 +318,7 @@ func responsesRequest(src map[string]any, tools *toolIndex, dropped *[]string) (
 				// messages.
 				*dropped = append(*dropped, p)
 			default:
-				return nil, invalid(p+".type", "unsupported input item")
+				*dropped = append(*dropped, p)
 			}
 		}
 	default:

@@ -73,7 +73,7 @@ func fieldsAccept(obj map[string]any, path, allowed string, accept ...string) ([
 		if set[k] {
 			continue
 		}
-		if accepted[k] {
+		if accepted["*"] || accepted[k] {
 			ignored = append(ignored, k)
 			continue
 		}

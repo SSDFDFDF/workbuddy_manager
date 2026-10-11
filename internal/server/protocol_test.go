@@ -285,7 +285,7 @@ func TestUnsupportedProtocolInputNeverReachesUpstream(t *testing.T) {
 	h := NewHandler(Config{Pool: testPoolWith(&auth.Auth{UID: "u", AccessToken: "a", ExpiresAt: 9999999999}), Upstream: up})
 	for path, body := range map[string]string{
 		"/v1/responses": `{"model":"x","input":"hi","store":false,"previous_response_id":"other-user-response"}`,
-		"/v1/messages":  `{"model":"x","max_tokens":1,"messages":[{"role":"user","content":"hi"}],"context_management":{"edits":[]}}`,
+		"/v1/messages":  `{"model":"x","max_tokens":0,"messages":[{"role":"user","content":"hi"}]}`,
 	} {
 		r := httptest.NewRequest("POST", path, strings.NewReader(body))
 		r.Header.Set("Anthropic-Version", "2023-06-01")

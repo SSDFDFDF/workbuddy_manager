@@ -10,10 +10,7 @@ import (
 func anthropicRequest(src map[string]any, dropped *[]string) (map[string]any, error) {
 	// metadata/service_tier/top_k/cache_control 是客户端遥测、路由与缓存提示，
 	// output_config.format 以外的字段无 Chat 等价物：接受并在 Dropped 里记账。
-	ignored, err := fieldsAccept(src, "", "model messages system max_tokens stream temperature top_p tools tool_choice thinking stop_sequences output_config", "metadata service_tier top_k cache_control")
-	if err != nil {
-		return nil, err
-	}
+	ignored, _ := fieldsAccept(src, "", "model messages system max_tokens stream temperature top_p tools tool_choice thinking stop_sequences output_config", "*")
 	*dropped = append(*dropped, ignored...)
 	if n, ok := jsondoc.Int(src["max_tokens"]); !ok || n <= 0 {
 		return nil, invalid("max_tokens", "positive integer required")
@@ -119,14 +116,15 @@ func anthropicRequest(src map[string]any, dropped *[]string) (map[string]any, er
 			if err != nil {
 				return nil, err
 			}
-			if err = fields(m, p, "type name description input_schema strict cache_control"); err != nil {
-				return nil, err
+			toolIgnored, _ := fieldsAccept(m, p, "type name description input_schema strict cache_control", "*")
+			for _, k := range toolIgnored {
+				*dropped = append(*dropped, p+"."+k)
 			}
 			if v := m["type"]; v != nil && v != "custom" {
-				return nil, invalid(p+".type", "only client-defined tools are supported")
+				*dropped = append(*dropped, p+".type")
 			}
-			if err = optionalFalse(m, "strict"); err != nil {
-				return nil, invalid(p+".strict", "schema-constrained generation is not verified")
+			if v, ok := m["strict"].(bool); ok && v {
+				*dropped = append(*dropped, p+".strict")
 			}
 			t, err := function(m["name"], m["description"], m["input_schema"], p)
 			if err != nil {
@@ -291,7 +289,7 @@ func anthropicRequest(src map[string]any, dropped *[]string) (map[string]any, er
 				// full transcript. The model re-reasons from the visible messages.
 				*dropped = append(*dropped, bp)
 			default:
-				return nil, invalid(bp+".type", "only text, image, tool_use, thinking and tool_result are supported")
+				*dropped = append(*dropped, bp)
 			}
 		}
 		if len(parts) > 0 || len(calls) > 0 {
