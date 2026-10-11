@@ -2,7 +2,7 @@
    自适应容器真实像素宽度（ResizeObserver），杜绝宽屏下 SVG viewBox 缩放导致的文字与轴线变大。
    双段堆叠（Prompt 读入 / Completion 产出）、清晰刻度网格、交互悬浮 Tooltip。 */
 import { useMemo, useState, useRef, useEffect } from 'react';
-import { fmtTok } from '../fmt';
+import { fmtTok, fmtNum } from '../fmt';
 
 export interface ChartPoint {
   t: number; // 毫秒
@@ -264,7 +264,9 @@ export function StackedBars({ pts, tick }: { pts: ChartPoint[]; tick?: (p: { t: 
           </div>
           <div className="flex items-center justify-between gap-3 text-[12px] font-semibold text-[var(--ink)]">
             <span>总计 Token</span>
-            <span className="tabular text-[var(--accent)]">{activePt.tt.toLocaleString()}</span>
+            <span className="tabular text-[var(--accent)]" title={`${fmtNum(activePt.tt)} tokens`}>
+              {fmtTok(activePt.tt)}
+            </span>
           </div>
           <div className="mt-1 flex flex-col gap-0.5 text-[11px] text-[var(--ink-2)]">
             <div className="flex items-center justify-between gap-3">
@@ -272,8 +274,8 @@ export function StackedBars({ pts, tick }: { pts: ChartPoint[]; tick?: (p: { t: 
                 <i className="h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
                 读 (Prompt)
               </span>
-              <span className="tabular font-medium text-[var(--ink)]">
-                {activePt.pt.toLocaleString()}{' '}
+              <span className="tabular font-medium text-[var(--ink)]" title={`${fmtNum(activePt.pt)} tokens`}>
+                {fmtTok(activePt.pt)}{' '}
                 <span className="text-[10px] text-[var(--ink-3)]">
                   ({activePt.tt ? Math.round((activePt.pt / activePt.tt) * 100) : 0}%)
                 </span>
@@ -284,8 +286,8 @@ export function StackedBars({ pts, tick }: { pts: ChartPoint[]; tick?: (p: { t: 
                 <i className="h-1.5 w-1.5 rounded-full bg-[var(--ok)]" />
                 取 (Completion)
               </span>
-              <span className="tabular font-medium text-[var(--ink)]">
-                {activePt.ct.toLocaleString()}{' '}
+              <span className="tabular font-medium text-[var(--ink)]" title={`${fmtNum(activePt.ct)} tokens`}>
+                {fmtTok(activePt.ct)}{' '}
                 <span className="text-[10px] text-[var(--ink-3)]">
                   ({activePt.tt ? Math.round((activePt.ct / activePt.tt) * 100) : 0}%)
                 </span>
@@ -294,7 +296,9 @@ export function StackedBars({ pts, tick }: { pts: ChartPoint[]; tick?: (p: { t: 
             {activePt.req > 0 && (
               <div className="flex items-center justify-between gap-3 text-[var(--ink-3)]">
                 <span>请求次数</span>
-                <span className="tabular">{activePt.req} 次</span>
+                <span className="tabular" title={`${fmtNum(activePt.req)} 次`}>
+                  {fmtTok(activePt.req)} 次
+                </span>
               </div>
             )}
           </div>
