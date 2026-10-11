@@ -996,7 +996,7 @@ func consume(r io.Reader, s *completionState, emit func(sseEvent, map[string]any
 	}
 	var prelude []buffered
 	// deliver 把一帧送进聚合状态并按序透出（含 prelude 续传与已透出正文的回收）。
-	// 标记还原（WithMarkupRepair）展开出的正文帧 / 调用帧 / 收尾帧与流尾兑底帧
+	// 标记还原（WithMarkupRepair）展开出的正文帧 / 调用帧 / 收尾帧与流尾兜底帧
 	// 都走这里：合成帧不绕过任何既有校验（index 唯一、finish 顺序、tool_calls
 	// 完整性），与非合成帧同一条路径。
 	deliver := func(e sseEvent, f map[string]any) error {

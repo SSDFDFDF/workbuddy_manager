@@ -416,3 +416,45 @@ func TestMarkupCounters(t *testing.T) {
 }
 
 // mustJSON 复用 effort_clamp_test.go 的同名声明（同包测试文件）。
+
+// TestMarkupTailFramesOnTruncatedStream：流没有收尾帧就结束（截断）时，
+// tailFrames 必须把机器里未判定的字节原文交还——客户端已收到的字节不因
+// 截断而丢失（complete() 仍按既有契约报截断，观测不伪装成功）。
+func TestMarkupTailFramesOnTruncatedStream(t *testing.T) {
+	tail := "正文尾部" + "<" + markupPipe + "DSML" + markupPipe + " calls>没写完"
+	sse := chunk(t, map[string]any{"content": tail}, nil) + "data: [DONE]\n\n"
+	w := httptest.NewRecorder()
+	repair := NewMarkupRepair(nil, true)
+	err := StreamHint(w, strings.NewReader(sse), nil, WithMarkupRepair(repair))
+	if err == nil {
+		t.Fatal("truncated stream must not be reported as success")
+	}
+	out := w.Body.String()
+	for _, want := range []string{"正文尾部", "DSML", "没写完"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("tail bytes lost (%q):\n%s", want, out)
+		}
+	}
+	if repair.Converted() != 0 {
+		t.Fatalf("truncated tail must not convert: %d", repair.Converted())
+	}
+}
+
+// TestMarkupTailFramesAfterFinishRewrite：收尾帧之前已还原过调用时，
+// 上游 stop 收尾被改写为 tool_calls；随后无更多帧时不再补帧。
+func TestMarkupTailFramesAfterFinishRewrite(t *testing.T) {
+	fix := leakedFixture(t)
+	sse := chunk(t, map[string]any{"content": fix}, nil) +
+		chunk(t, map[string]any{}, "stop") + "data: [DONE]\n\n"
+	w := httptest.NewRecorder()
+	if err := StreamHint(w, strings.NewReader(sse), nil, WithMarkupRepair(NewMarkupRepair(nil, true))); err != nil {
+		t.Fatal(err)
+	}
+	out := w.Body.String()
+	if strings.Count(out, "\"finish_reason\":\"tool_calls\"") != 1 {
+		t.Fatalf("want exactly one rewritten finish:\n%s", out)
+	}
+	if strings.Count(out, "\"tool_calls\":[") != 2 { // 两帧各带一个调用
+		t.Fatalf("want two call frames:\n%s", out)
+	}
+}

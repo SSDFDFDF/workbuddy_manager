@@ -2194,3 +2194,64 @@ func TestChatMarkupRepairRecorded(t *testing.T) {
 		})
 	}
 }
+
+// TestChatMarkupRepairStrictAllowlist 严格判定：请求声明了 tools 时按名单比对。
+// 名单内命中还原；名单外工具名不认——原文透出、不产生 tool_calls、不改写归档。
+func TestChatMarkupRepairStrictAllowlist(t *testing.T) {
+	leaked, err := os.ReadFile("../upstream/testdata/leaked_markup.txt")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	esc, _ := json.Marshal(string(leaked))
+	leakSSE := `data: {"id":"c","object":"chat.completion.chunk","created":1,"model":"glm-5.2","choices":[{"index":0,"delta":{"role":"assistant","content":` + string(esc) + `}}]}` + "\n\n" +
+		`data: {"id":"c","object":"chat.completion.chunk","created":1,"model":"glm-5.2","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}` + "\n\ndata: [DONE]\n\n"
+
+	cases := []struct {
+		name       string
+		tool       string
+		wantCalls  bool
+		wantMarkup bool
+	}{
+		{name: "declared", tool: "exec_command", wantCalls: true, wantMarkup: false},
+		{name: "undeclared", tool: "other_tool", wantCalls: false, wantMarkup: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			up := newFakeUpstream(t, func(string) (int, string, bool) { return 200, leakSSE, true })
+			rec := reqlog.New(reqlog.Config{})
+			h := NewHandler(Config{
+				Pool:       testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
+				Upstream:   up,
+				RequestLog: rec,
+			})
+			body := `{"model":"glm-5.2","messages":[{"role":"user","content":"go"}],"tools":[{"type":"function","function":{"name":"` + tc.tool + `","parameters":{"type":"object"}}}]}`
+			req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			if w.Code != 200 {
+				t.Fatalf("code=%d body=%s", w.Code, w.Body)
+			}
+			out := w.Body.String()
+			if got := strings.Contains(out, "tool_calls"); got != tc.wantCalls {
+				t.Fatalf("tool_calls present=%v want %v:\n%s", got, tc.wantCalls, out)
+			}
+			if got := strings.Contains(out, "DSML"); got != tc.wantMarkup {
+				t.Fatalf("markup passthrough=%v want %v:\n%s", got, tc.wantMarkup, out)
+			}
+			snap := rec.Snapshot()
+			if len(snap.Recent) == 0 {
+				t.Fatal("no request recorded")
+			}
+			e := snap.Recent[len(snap.Recent)-1]
+			recorded := false
+			for _, rw := range e.Rewritten {
+				if strings.HasPrefix(rw, "tool_calls.markup:") {
+					recorded = true
+				}
+			}
+			if recorded != tc.wantCalls {
+				t.Fatalf("rewrite recorded=%v want %v: %v", recorded, tc.wantCalls, e.Rewritten)
+			}
+		})
+	}
+}

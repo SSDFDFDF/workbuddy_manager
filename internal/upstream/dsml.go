@@ -433,10 +433,14 @@ func ToolNameAllowlistDoc(obj map[string]any) map[string]bool {
 // markupStream 在一次响应流上协调各 choice 的标记还原（consume 逐帧调用）。
 // 流式与非流式共用同一入口：非流式只是「emit 为 nil 的同一条帧序列」，聚合结果
 // 与逐帧透出天然一致。多 choice 各自独立还原（各有状态机与合成帧编号），互不串流。
+//
+// 非并发安全、不可跨流复用：一条响应流一个对象（由 WithMarkupRepair 在 consume
+// 入口构造）。expand 返回的切片由 buf 复用，只能在下一次 expand 之前使用。
 type markupStream struct {
-	repair   *MarkupRepair
-	choices  map[int]*markupChoice
-	template map[string]any // 最近一帧的顶层字段（id/model/created），合成帧兜底
+	repair  *MarkupRepair
+	choices map[int]*markupChoice
+	last    map[string]any   // 最近一帧（合成帧的顶字段模板：id/model/created）
+	buf     []map[string]any // expand 结果复用缓冲（避免每帧一次切片分配）
 }
 
 // markupChoice 是单个 choice 的还原簿记。
@@ -477,9 +481,14 @@ func (ms *markupStream) expand(obj map[string]any) []map[string]any {
 	}
 	chs, ok := obj["choices"].([]any)
 	if !ok || len(chs) == 0 {
-		return []map[string]any{obj}
+		// 无 choice 帧（usage-only 等）：同样复用缓冲，不更新 last。
+		ms.buf = append(ms.buf[:0], obj)
+		return ms.buf
 	}
-	ms.noteTemplate(obj)
+	ms.last = obj
+	// expand 结果复用 ms.buf：本函数返回后到下一次 expand 之前有效（调用方只在
+	// 本帧内按序遍历，不持有）。无可展开内容时仍走单元素复用缓冲，避免热路径分配。
+	ms.buf = append(ms.buf[:0], obj)
 	type piece struct {
 		idx     int
 		ch      map[string]any
@@ -491,7 +500,12 @@ func (ms *markupStream) expand(obj map[string]any) []map[string]any {
 		emit    string
 		calls   []MarkupCall
 	}
-	pieces := make([]piece, 0, len(chs))
+	// 绝大多数请求只有一个 choice：小数组走栈，多 choice 才堆分配。
+	var pieceBuf [4]piece
+	pieces := pieceBuf[:0]
+	if len(chs) > len(pieceBuf) {
+		pieces = make([]piece, 0, len(chs))
+	}
 	anyWork := false
 	// 第一遍：簿记。结构化 tool_calls 出现 → 本 choice 让位，此前缓冲的未判定
 	// 字节原文回吐（先于本帧正文透出）。
@@ -521,10 +535,14 @@ func (ms *markupStream) expand(obj map[string]any) []map[string]any {
 						}
 					}
 				}
-				if rest := st.machine.Flush(); rest != "" {
-					p.emit += rest
+				if st.machine != nil {
+					// 让位：此前缓冲的未判定字节原文回吐（先于本帧正文）；
+					// 无论有无残留都丢弃状态机，避免空机器让后续每帧都走展开慢路。
+					if rest := st.machine.Flush(); rest != "" {
+						p.emit += rest
+						anyWork = true
+					}
 					st.machine = nil
-					anyWork = true
 				}
 			}
 			if !st.upstreamCalls {
@@ -544,7 +562,7 @@ func (ms *markupStream) expand(obj map[string]any) []map[string]any {
 		pieces = append(pieces, p)
 	}
 	if !anyWork {
-		return []map[string]any{obj}
+		return ms.buf
 	}
 	// 第二遍：收尾帧到来先排空机器（残留字节必须先于收尾透出），再喂本帧正文。
 	anyCalls := false
@@ -575,8 +593,8 @@ func (ms *markupStream) expand(obj map[string]any) []map[string]any {
 	// 未命中但本 choice 此前还原过调用、上游收尾是 stop → 原地改写为 tool_calls；
 	// 本来就没有 finish 的中间帧不动（绝不凭空造收尾），length / content_filter
 	// 等其他收尾语义更需要被客户端看到，也不动。
-	frames := []map[string]any{obj}
-	takenFinish := map[int]string{}
+	frames := ms.buf
+	var takenFinish map[int]string
 	for i := range pieces {
 		p := &pieces[i]
 		st := ms.choice(p.idx)
@@ -589,6 +607,9 @@ func (ms *markupStream) expand(obj map[string]any) []map[string]any {
 		}
 		if anyCalls && p.hasEnd {
 			delete(p.ch, "finish_reason")
+			if takenFinish == nil {
+				takenFinish = map[int]string{}
+			}
 			takenFinish[p.idx] = p.finish
 		} else if p.hasEnd && p.finish == "stop" && st.restored > 0 {
 			p.ch["finish_reason"] = "tool_calls"
@@ -638,22 +659,22 @@ func (ms *markupStream) tailFrames() []map[string]any {
 	return out
 }
 
-func (ms *markupStream) noteTemplate(obj map[string]any) {
-	t := map[string]any{}
+// markupFrame 按最近一帧的顶字段（id/model/created）构造一个合成 chunk 骨架。
+// 只读不拷：模板帧在本帧内不被改动（合成帧构造先于 emit 阶段的字段搬移），
+// 省掉每帧一次 map 分配。
+func (ms *markupStream) markupFrame() map[string]any {
+	frame := map[string]any{"object": "chat.completion.chunk"}
 	for _, k := range []string{"id", "model", "created"} {
-		if v, ok := obj[k]; ok && v != nil {
-			t[k] = v
+		if v, ok := ms.last[k]; ok && v != nil {
+			frame[k] = v
 		}
 	}
-	ms.template = t
+	return frame
 }
 
 // contentFrame 构造一帧只带正文的 chunk（流尾兜底回吐用）。
 func (ms *markupStream) contentFrame(idx int, text string) map[string]any {
-	frame := map[string]any{"object": "chat.completion.chunk"}
-	for k, v := range ms.template {
-		frame[k] = v
-	}
+	frame := ms.markupFrame()
 	frame["choices"] = []any{map[string]any{
 		"index": float64(idx),
 		"delta": map[string]any{"content": text},
@@ -665,10 +686,7 @@ func (ms *markupStream) contentFrame(idx int, text string) map[string]any {
 // index 一律 float64：帧内数值经解码就是这个类型，合成帧保持同口径，避免任何
 // 按类型断言的下游读取静默失败。
 func (ms *markupStream) callFrame(idx, base int, call MarkupCall) map[string]any {
-	frame := map[string]any{"object": "chat.completion.chunk"}
-	for k, v := range ms.template {
-		frame[k] = v
-	}
+	frame := ms.markupFrame()
 	frame["choices"] = []any{map[string]any{
 		"index": float64(idx),
 		"delta": map[string]any{"tool_calls": []any{map[string]any{
@@ -683,10 +701,7 @@ func (ms *markupStream) callFrame(idx, base int, call MarkupCall) map[string]any
 
 // finishFrame 构造一帧只带 finish_reason 的收尾 chunk（空 delta）。
 func (ms *markupStream) finishFrame(idx int, finish string) map[string]any {
-	frame := map[string]any{"object": "chat.completion.chunk"}
-	for k, v := range ms.template {
-		frame[k] = v
-	}
+	frame := ms.markupFrame()
 	frame["choices"] = []any{map[string]any{
 		"index":         float64(idx),
 		"delta":         map[string]any{},
