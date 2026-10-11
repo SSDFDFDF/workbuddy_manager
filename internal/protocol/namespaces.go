@@ -118,6 +118,12 @@ func (idx *toolIndex) declarations(v any, dropped *[]string) ([]any, error) {
 			return nil, err
 		}
 		if m["type"] != "namespace" {
+			if m["type"] != "function" {
+				if dropped != nil {
+					*dropped = append(*dropped, p)
+				}
+				continue
+			}
 			t, err := idx.add(m, "", p, dropped)
 			if err != nil {
 				return nil, err

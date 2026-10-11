@@ -116,6 +116,10 @@ func anthropicRequest(src map[string]any, dropped *[]string) (map[string]any, er
 			if err != nil {
 				return nil, err
 			}
+			if m["input_schema"] == nil || (m["type"] != nil && m["type"] != "custom" && m["type"] != "function") {
+				*dropped = append(*dropped, p)
+				continue
+			}
 			toolIgnored, _ := fieldsAccept(m, p, "type name description input_schema strict cache_control", "*")
 			for _, k := range toolIgnored {
 				*dropped = append(*dropped, p+"."+k)
@@ -203,7 +207,6 @@ func anthropicRequest(src map[string]any, dropped *[]string) (map[string]any, er
 			return nil, invalid(p+".content", "string or non-empty content array required")
 		}
 		parts, calls := []any{}, []any{}
-		seenCall := false
 		for j, v := range blocks {
 			bp := fmt.Sprintf("%s.content[%d]", p, j)
 			b, err := object(v, bp)
@@ -212,9 +215,6 @@ func anthropicRequest(src map[string]any, dropped *[]string) (map[string]any, er
 			}
 			switch b["type"] {
 			case "text":
-				if seenCall {
-					return nil, invalid(bp, "text after tool_use cannot preserve block order in Chat")
-				}
 				part, err := textPartFrom(b, bp, "text")
 				if err != nil {
 					return nil, err
@@ -249,10 +249,9 @@ func anthropicRequest(src map[string]any, dropped *[]string) (map[string]any, er
 					return nil, err
 				}
 				calls = append(calls, call)
-				seenCall = true
 			case "tool_result":
-				if role != "user" || len(parts) != 0 {
-					return nil, invalid(bp, "tool_result must precede user text and images")
+				if role != "user" {
+					return nil, invalid(bp, "tool_result requires user role")
 				}
 				if err = fields(b, bp, "type tool_use_id content is_error cache_control"); err != nil {
 					return nil, err

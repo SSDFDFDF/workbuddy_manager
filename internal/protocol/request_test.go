@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -67,7 +68,6 @@ func TestUnsupportedAndInvalidRequests(t *testing.T) {
 		{Responses, `{"model":"x","store":false,"input":"hi","truncation":"always"}`, "truncation"},
 		{Responses, `{"model":"x","store":false,"input":"hi","include":["reasoning.encrypted_content",3]}`, "include[1]"},
 		{Responses, `{"model":"x","store":false,"input":"hi","text":{"verbosity":true}}`, "text.verbosity"},
-		{Responses, `{"model":"x","store":false,"input":"hi","text":{"format":{"type":"json_object"}}}`, "text.format"},
 		{Responses, `{"model":"x","store":false,"input":[{"role":"user","content":[{"type":"input_image","image_url":"http://x"}]}]}`, "input"},
 		{Responses, `{"model":"x","store":false,"input":[{"type":"function_call_output","call_id":"missing","output":"ok"}]}`, "tool_call_id"},
 		{Responses, `{"model":"x","store":false,"input":"hi","temperature":3}`, "temperature"},
@@ -79,7 +79,6 @@ func TestUnsupportedAndInvalidRequests(t *testing.T) {
 		{Anthropic, `{"model":"x","max_tokens":1,"messages":[{"role":"user","content":"hi"}],"stop_sequences":"END"}`, "stop_sequences"},
 		{Anthropic, `{"model":"x","max_tokens":1,"messages":[{"role":"user","content":"hi"}],"stop_sequences":["END",""]}`, "stop_sequences[1]"},
 		{Anthropic, `{"model":"x","max_tokens":1,"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"bad","is_error":"yes"}]}]}`, "is_error"},
-		{Anthropic, `{"model":"x","max_tokens":1,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"a","name":"f","input":{}},{"type":"text","text":"after"}]}]}`, "order"},
 	}
 	for _, tt := range cases {
 		t.Run(string(tt.kind)+"/"+tt.param, func(t *testing.T) {
@@ -381,6 +380,97 @@ func TestNativeRequestStillPreservesExtensions(t *testing.T) {
 	r := mustDecode(t, Chat, `{"model":"x","messages":[{"role":"user","content":"hi"}],"custom":{"n":9007199254740993}}`)
 	if r.Chat.Object["custom"] == nil {
 		t.Fatal("native extension lost")
+	}
+}
+
+func TestUnsupportedToolsDropped(t *testing.T) {
+	// Responses API: tools[0] is web_search_preview (non-function tool), tools[1] is a valid function.
+	resp := mustDecode(t, Responses, `{"model":"x","store":false,"input":"hi","tools":[`+
+		`{"type":"web_search_preview"},`+
+		`{"type":"function","name":"lookup","parameters":{"type":"object"}}`+
+		`]}`)
+	if !containsString(resp.Dropped, "tools[0]") {
+		t.Fatalf("expected tools[0] in dropped: %v", resp.Dropped)
+	}
+	tools, ok := resp.Chat.Object["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("expected exactly 1 tool forwarded, got: %v", tools)
+	}
+	fn := tools[0].(map[string]any)["function"].(map[string]any)
+	if fn["name"] != "lookup" {
+		t.Fatalf("expected lookup tool forwarded, got: %v", fn)
+	}
+
+	// Anthropic API: tools[0] is computer use (no input_schema), tools[1] is valid tool with input_schema.
+	ant := mustDecode(t, Anthropic, `{"model":"x","max_tokens":10,"messages":[{"role":"user","content":"hi"}],"tools":[`+
+		`{"type":"computer_20241022","name":"computer","display_width_px":1024,"display_height_px":768},`+
+		`{"name":"lookup","input_schema":{"type":"object"}}`+
+		`]}`)
+	if !containsString(ant.Dropped, "tools[0]") {
+		t.Fatalf("expected tools[0] in dropped: %v", ant.Dropped)
+	}
+	antTools, ok := ant.Chat.Object["tools"].([]any)
+	if !ok || len(antTools) != 1 {
+		t.Fatalf("expected exactly 1 tool forwarded, got: %v", antTools)
+	}
+	antFn := antTools[0].(map[string]any)["function"].(map[string]any)
+	if antFn["name"] != "lookup" {
+		t.Fatalf("expected lookup tool forwarded, got: %v", antFn)
+	}
+
+	// If all tools are dropped and tool_choice is "required" / "any", reject with 400.
+	if _, err := Decode(Responses, []byte(`{"model":"x","store":false,"input":"hi","tools":[{"type":"web_search_preview"}],"tool_choice":"required"}`)); err == nil {
+		t.Fatal("expected error when tool_choice is required but all tools dropped")
+	}
+	if _, err := Decode(Anthropic, []byte(`{"model":"x","max_tokens":10,"messages":[{"role":"user","content":"hi"}],"tools":[{"type":"computer_20241022","name":"computer"}],"tool_choice":{"type":"any"}}`)); err == nil {
+		t.Fatal("expected error when Anthropic tool_choice is any but all tools dropped")
+	}
+}
+
+func TestRelaxedFormatAndInterleavedMessages(t *testing.T) {
+	// Responses text.format:json_object should be accepted and recorded in Dropped instead of 400.
+	resp := mustDecode(t, Responses, `{"model":"x","store":false,"input":"hi","text":{"format":{"type":"json_object"}}}`)
+	if !containsString(resp.Dropped, "text.format") {
+		t.Fatalf("expected text.format in dropped: %v", resp.Dropped)
+	}
+
+	// Responses metadata: non-string and complex values accepted without 400.
+	respMeta := mustDecode(t, Responses, `{"model":"x","store":false,"input":"hi","metadata":{"count":42,"active":true,"extra":"hello"}}`)
+	meta, ok := respMeta.Source["metadata"].(map[string]any)
+	if !ok || fmt.Sprint(meta["count"]) != "42" {
+		t.Fatalf("expected metadata echoed: %v", respMeta.Source["metadata"])
+	}
+
+	// Anthropic: text after tool_use in assistant message should be accepted and preserved.
+	antAssistant := mustDecode(t, Anthropic, `{"model":"x","max_tokens":10,"messages":[`+
+		`{"role":"user","content":"hi"},`+
+		`{"role":"assistant","content":[{"type":"tool_use","id":"a","name":"f","input":{}},{"type":"text","text":"after"}]},`+
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"ok"}]}`+
+		`]}`)
+	asstMsgs := antAssistant.Chat.Object["messages"].([]any)
+	if len(asstMsgs) != 3 {
+		t.Fatalf("expected 3 messages, got: %d", len(asstMsgs))
+	}
+	asstContent := asstMsgs[1].(map[string]any)["content"]
+	if asstContent == nil {
+		t.Fatalf("expected assistant content preserved, got nil")
+	}
+
+	// Anthropic: text before tool_result in user message should be accepted and properly ordered (tool before user).
+	antUser := mustDecode(t, Anthropic, `{"model":"x","max_tokens":10,"messages":[`+
+		`{"role":"user","content":"hi"},`+
+		`{"role":"assistant","content":[{"type":"tool_use","id":"a","name":"f","input":{}}]},`+
+		`{"role":"user","content":[{"type":"text","text":"note"},{"type":"tool_result","tool_use_id":"a","content":"ok"}]}`+
+		`]}`)
+	userMsgs := antUser.Chat.Object["messages"].([]any)
+	if len(userMsgs) != 4 {
+		t.Fatalf("expected 4 messages (user, assistant, tool, user), got: %d", len(userMsgs))
+	}
+	if userMsgs[2].(map[string]any)["role"] != "tool" {
+		t.Fatalf("expected 3rd message to be tool, got: %v", userMsgs[2])
+	}
+	if userMsgs[3].(map[string]any)["role"] != "user" {
+		t.Fatalf("expected 4th message to be user, got: %v", userMsgs[3])
 	}
 }
 

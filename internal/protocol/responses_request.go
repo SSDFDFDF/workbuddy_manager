@@ -87,11 +87,8 @@ func responsesRequest(src map[string]any, tools *toolIndex, dropped *[]string) (
 			if err != nil {
 				return nil, err
 			}
-			if err = fields(f, "text.format", "type"); err != nil {
-				return nil, err
-			}
 			if f["type"] != "text" {
-				return nil, invalid("text.format", "only plain text is supported; structured output is not verified")
+				*dropped = append(*dropped, "text.format")
 			}
 		}
 	}
@@ -148,18 +145,8 @@ func responsesRequest(src map[string]any, tools *toolIndex, dropped *[]string) (
 		return nil, err
 	}
 	if v := src["metadata"]; v != nil {
-		m, err := object(v, "metadata")
-		if err != nil {
+		if _, err := object(v, "metadata"); err != nil {
 			return nil, err
-		}
-		if len(m) > 16 {
-			return nil, invalid("metadata", "at most 16 entries allowed")
-		}
-		for k, v := range m {
-			s, ok := v.(string)
-			if !ok || len(k) > 64 || len(s) > 512 {
-				return nil, invalid("metadata", "string keys up to 64 bytes and values up to 512 bytes required")
-			}
 		}
 		// Client metadata is echoed only, not interpreted as WorkBuddy routing.
 	}

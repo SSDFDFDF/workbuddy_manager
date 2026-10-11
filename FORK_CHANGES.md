@@ -27,7 +27,7 @@
 | 12 | **裸模型名默认域** | `model_default_realm = cn / global / auto(:cn,global) / auto:global,cn` | `cn` |
 | 13 | **客户端特征对齐** | 稳定设备/会话指纹、硬件特征离散化、`/v2/report` 桌面指纹、版本自检 | 启用 |
 | 14 | **面板版本配置** | 占位符来自后端内置基线（不硬编码）；「一键填入已拉取版本」；CLI 版本需人工核对 | 生效 |
-| 15 | **Responses / Anthropic 桥接** | `/v1/responses` 无状态文本 / function tools；`/v1/messages` 文本 / client tools。复用原有执行、重试、用量与日志；原生 Chat 保留扩展。纯提示/遥测字段与客户端侧推理状态接受即丢（写入请求归档并在面板展示）；近似变换显式可见（`is_error` → `[tool error]` 前缀、`stop_sequences` → Chat `stop`）；会改变语义或伪造能力的字段（`previous_response_id` / `conversation` / `background:true` / `text.format` 结构化输出 / `strict:true` / 白名单外未知字段）仍明确 400。见 [兼容说明](docs/PROTOCOL_COMPATIBILITY.md) | 生效（限定子集） |
+| 15 | **Responses / Anthropic 桥接** | `/v1/responses` 无状态文本 / function tools；`/v1/messages` 文本 / client tools。复用原有执行、重试、用量与日志；原生 Chat 保留扩展。纯提示/遥测字段、不支持的工具声明与客户端侧推理状态接受即丢（写入请求归档并在面板展示）；近似变换显式可见（`is_error` → `[tool error]` 前缀、`stop_sequences` → Chat `stop`）；会改变语义或伪造能力的字段（`previous_response_id` / `conversation` / `background:true` / `strict:true` / 白名单外未知字段）仍明确 400。见 [兼容说明](docs/PROTOCOL_COMPATIBILITY.md) | 生效（限定子集） |
 | 16 | **模型目录门禁（显式刷新制）** | 出站前先查模型目录快照：快照可用而模型不存在 → 直接 `404 model_not_found`，不选号、不打上游；命中时顺带重排候选域与纠正大小写。快照为空 → fail-open。快照只在启动预热与面板「模型能力」页手动刷新时写入；客户端请求路径零上游探测 | 生效 |
 
 ---
