@@ -408,6 +408,7 @@ export function TasksCenterView() {
   const startPolling = () => {
     stopPoll();
     timerRef.current = setInterval(async () => {
+      if (document.hidden) return; // 切后台/最小化没人看，别白打 tasks/queue
       try {
         const q = await api<QueueStatus>('tasks/queue');
         if (!q.started) return;
