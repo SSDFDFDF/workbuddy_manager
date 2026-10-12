@@ -109,8 +109,10 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		// 按 domain 推断 realm：workbuddy.ai 家族 → global，否则 cn。
 		realm := auth.ResolveRealm("", acc.Domain)
 
-		// cockpit tools 的 expires_at 为毫秒时间戳，转为秒。
-		expiresAt := acc.ExpiresAt / 1000
+		// cockpit tools 的 expires_at 历史上为毫秒时间戳。改用 auth.NormalizeExpiresAt
+		// 按量级判别（幂等）：无条件 /1000 会把已是秒的导入值打成 1970 年 →
+		// NeedsRefresh 恒真 → 刷新风暴；这里与 Parse 共用同一判据，避免口径漂移。
+		expiresAt := auth.NormalizeExpiresAt(acc.ExpiresAt)
 		if expiresAt <= 0 {
 			expiresAt = time.Now().Add(365 * 24 * time.Hour).Unix()
 		}

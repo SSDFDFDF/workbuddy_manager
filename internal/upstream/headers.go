@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"workbuddy_manager/internal/auth"
@@ -423,12 +424,42 @@ func (c *Client) BillingHeaders(req *http.Request, a *auth.Auth) {
 }
 
 // RefreshHeaders refresh 端点专属头（X-Refresh-Token 只允许出现在这里）。
+//
+// 头族对齐官方客户端：客户端的 refreshSession 只显式设 X-Refresh-Token /
+// X-Auth-Refresh-Source / enterpriseHeaders(X-Domain)，其余靠全局 auth 请求拦截器
+// 自动注入——该拦截器只要请求没设 X-No-Authorization 就会带 Authorization、
+// X-User-Id、X-Enterprise-Id、X-Tenant-Id、X-Domain。refresh 请求未设任何 X-No-*，
+// 故这五头在真实客户端上全部存在，此处逐个补齐以保持出站指纹同形。
 func (c *Client) RefreshHeaders(req *http.Request, a *auth.Auth) {
 	c.CommonHeaders(req, a)
 	req.Header.Set("User-Agent", c.purposeUA(a, "refresh"))
 	req.Header.Set("X-Refresh-Token", a.RefreshToken)
+	// Authorization 在 refresh 端点是「顺带声明」而非鉴权权威（权威是 X-Refresh-Token），
+	// 因此即使 accessToken 已过期也照发：客户端正是这么做的——它的业务 API 401
+	// 拦截器会在 token 刚被上游判为无效后立即调 refreshSession()，那次刷新请求依然
+	// 带着这个已失效的 Bearer（拦截器无条件注入）且能成功续期，反证上游在 refresh
+	// 端点不校验 Authorization。故此处与客户端同形，不按过期与否分叉。
+	if at := a.AccessTokenValue(); at != "" {
+		req.Header.Set("Authorization", "Bearer "+at)
+	}
+	if a.UID != "" {
+		req.Header.Set("X-User-Id", a.UID)
+	}
 	if a.EnterpriseID != "" {
 		req.Header.Set("X-Enterprise-Id", a.EnterpriseID)
+		req.Header.Set("X-Tenant-Id", a.EnterpriseID)
+	}
+	// X-Domain 对齐官方客户端 refresh 的 enterpriseHeaders(auth)：优先账号落盘 domain，
+	// 缺失时回落到 refresh 端点 host（客户端用 endpoint.authority 兑底，此处同语义）。
+	// 客户端 refresh 请求总带 X-Domain，补齐此头避免上游按域缺失差异化对待。
+	dom := a.DomainValue()
+	if dom == "" {
+		if u, err := url.Parse(c.chatBase(a)); err == nil && u.Host != "" {
+			dom = u.Host
+		}
+	}
+	if dom != "" {
+		req.Header.Set("X-Domain", dom)
 	}
 	// X-Auth-Refresh-Source 对齐官方客户端 refresh 渠道标识 "plugin"（D3）。
 	req.Header.Set("X-Auth-Refresh-Source", "plugin")

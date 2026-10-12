@@ -31,14 +31,15 @@ import (
 	"time"
 
 	auth2 "workbuddy_manager/internal/auth"
+	"workbuddy_manager/internal/upstream"
 )
 
 // 上游常量：CN → copilot.tencent.com（Origin 为 codebuddy.cn）；global → www.workbuddy.ai
 // （base 与 Origin/Referer 同域）。端点 URL 由 realmConfig 按 realm 动态拼出，不再硬编码。
+// User-Agent 不再硬编码：改由 upstream.DefaultUA 按 realm 统一生成（与网关出站 UA 同形）。
 const (
 	upstreamBaseCN      = "https://copilot.tencent.com"
 	upstreamBaseGlobal  = "https://www.workbuddy.ai"
-	clientUA            = "CLI/2.63.2 CodeBuddy/2.63.2"
 	originRefererCN     = "https://www.codebuddy.cn"
 	originRefererGlobal = "https://www.workbuddy.ai"
 )
@@ -62,15 +63,30 @@ func realmConfig(realm string) (base, origin string) {
 }
 
 // commonHeaders 按 origin 设置通用请求头（Origin/Referer 随 realm 变化）。
-// 返回 func(*http.Request)，由调用方按 realm 选定的 origin 构造一次后复用。
-func commonHeaders(origin string) func(*http.Request) {
+// ua 为该次请求的 User-Agent（由 upstream.DefaultUA 按 realm 生成，与网关出站同形）。
+// 返回 func(*http.Request)，由调用方按 realm 选定的 origin/ua 构造一次后复用。
+func commonHeaders(origin, ua string) func(*http.Request) {
 	return func(req *http.Request) {
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json, text/plain, */*")
 		req.Header.Set("X-Requested-With", "XMLHttpRequest")
 		req.Header.Set("Origin", origin)
 		req.Header.Set("Referer", origin+"/")
-		req.Header.Set("User-Agent", clientUA)
+		req.Header.Set("User-Agent", ua)
+	}
+}
+
+// noAuthLoginHeaders = commonHeaders + 官方客户端在未认证的 auth/state & auth/token
+// 请求上发的 X-No-* 声明头（实机抓包：四者值均为字符串 "true"）。
+// 对齐客户端：X-No-Authorization/X-No-User-Id/X-No-Enterprise-Id/X-No-Department-Info。
+func noAuthLoginHeaders(origin, ua string) func(*http.Request) {
+	base := commonHeaders(origin, ua)
+	return func(req *http.Request) {
+		base(req)
+		req.Header.Set("X-No-Authorization", "true")
+		req.Header.Set("X-No-User-Id", "true")
+		req.Header.Set("X-No-Enterprise-Id", "true")
+		req.Header.Set("X-No-Department-Info", "true")
 	}
 }
 
@@ -90,8 +106,8 @@ func doJSON(client *http.Client, method, fullURL string, headers func(*http.Requ
 	if headers != nil {
 		headers(req)
 	} else {
-		// 缺省头：CN origin（与原 commonHeaders() 行为一致，零回归）
-		commonHeaders(originRefererCN)(req)
+		// 缺省头：CN origin + 统一默认 UA（与原 commonHeaders() 行为一致，零回归）
+		commonHeaders(originRefererCN, upstream.DefaultUA(realmCN, "chat"))(req)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -206,7 +222,7 @@ func validateRealmMatch(stateRealm, cliRealm string) error {
 // state 落盘（带 realm），stdout 打印 authURL。out 接 stdout；stateFile 为落盘路径
 // （可注入临时文件便于测试）。空 realm 视为缺省（调用方已归一）。
 func runURL(base, origin, realm, statePath string, client *http.Client, out io.Writer) {
-	headers := commonHeaders(origin)
+	headers := noAuthLoginHeaders(origin, upstream.DefaultUA(realm, "chat"))
 	data, _, err := doJSON(client, http.MethodPost, base+"/v2/plugin/auth/state?platform=CLI", headers, bytes.NewReader([]byte("{}")))
 	if err != nil {
 		fatal("auth state failed: %v", err)
@@ -241,10 +257,12 @@ func runPoll(base, origin, realm, statePath string, client *http.Client, out io.
 	if err := validateRealmMatch(ls.Realm, realm); err != nil {
 		fatal("%v", err)
 	}
-	headers := commonHeaders(origin)
+	ua := upstream.DefaultUA(realm, "chat")
+	headers := commonHeaders(origin, ua)
 	// handlePollLogin (oauth.go:108-162)：auth/token 是权威登录状态端点，
-	// pending 时业务 code 非 0（"login ing"），完成时 code=0 + token bundle
-	tokRaw, status, errTok := doJSON(client, http.MethodGet, base+"/v2/plugin/auth/token?state="+ls.State, headers, nil)
+	// pending 时业务 code 非 0（"login ing"），完成时 code=0 + token bundle。
+	// 未认证端点带 X-No-* 声明头（对齐官方客户端 auth/token 请求）。
+	tokRaw, status, errTok := doJSON(client, http.MethodGet, base+"/v2/plugin/auth/token?state="+ls.State, noAuthLoginHeaders(origin, ua), nil)
 	if errTok != nil {
 		if status == 0 || status >= 500 {
 			fatal("token endpoint error: %v", errTok)
@@ -269,6 +287,11 @@ func runPoll(base, origin, realm, statePath string, client *http.Client, out io.
 	acctHeaders := func(r *http.Request) {
 		headers(r)
 		r.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+		// login/account 已授权（带 Bearer），故不发 X-No-Authorization；其余三个 X-No-*
+		// 声明头与官方客户端 login/account 请求对齐。
+		r.Header.Set("X-No-User-Id", "true")
+		r.Header.Set("X-No-Enterprise-Id", "true")
+		r.Header.Set("X-No-Department-Info", "true")
 	}
 	if acctRaw, _, errAcct := doJSON(client, http.MethodGet, base+"/v2/plugin/login/account?state="+ls.State, acctHeaders, nil); errAcct == nil {
 		_ = json.Unmarshal(acctRaw, &acct)

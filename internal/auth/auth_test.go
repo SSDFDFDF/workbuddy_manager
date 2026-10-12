@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -328,3 +329,98 @@ func TestUseProxyParseAndSave(t *testing.T) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// TestParseExpiresAtMsNormalization 桌面端状态文件的 expiresAt 是毫秒
+// （Date.now()+1000*expiresIn），Parse 应归一到 Unix 秒；正常秒值原样保留。
+func TestParseExpiresAtMsNormalization(t *testing.T) {
+	cases := []struct {
+		name string
+		in   int64
+		want int64
+	}{
+		{name: "毫秒归一为秒", in: 1753600000000, want: 1753600000},
+		{name: "秒值原样保留", in: 1753600000, want: 1753600000},
+		{name: "小秒值不变", in: 1, want: 1},
+		{name: "边界 1e10 视为秒", in: 9999999999, want: 9999999999},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			nested := []byte(`{"auth":{"accessToken":"at","refreshToken":"rt","expiresAt":` +
+				itoa(c.in) + `,"domain":""},"account":{"uid":"u1"}}`)
+			a, err := Parse(nested)
+			if err != nil {
+				t.Fatalf("parse err: %v", err)
+			}
+			if a.ExpiresAt != c.want {
+				t.Errorf("nested expiresAt=%d want %d", a.ExpiresAt, c.want)
+			}
+			flat := []byte(`{"accessToken":"at","refreshToken":"rt","expiresAt":` +
+				itoa(c.in) + `,"uid":"u2"}`)
+			b, err := Parse(flat)
+			if err != nil {
+				t.Fatalf("parse err: %v", err)
+			}
+			if b.ExpiresAt != c.want {
+				t.Errorf("flat expiresAt=%d want %d", b.ExpiresAt, c.want)
+			}
+		})
+	}
+}
+
+func itoa(v int64) string { return strconv.FormatInt(v, 10) }
+
+// TestExpiresAtUnitPreservedOnSave 读（归一为秒）与写（保持源单位）是一对：
+// 毫秒来源文件重新落盘必须仍为毫秒，否则同一文件被桌面端/插件读到时会把秒值
+// 当成 1970 年的毫秒时间戳 → 认为凭证早已过期 → 反复重登。
+func TestExpiresAtUnitPreservedOnSave(t *testing.T) {
+	dir := t.TempDir()
+
+	// 毫秒来源：落盘仍为毫秒。
+	msFile := filepath.Join(dir, "workbuddy-ms.json")
+	a, err := Parse([]byte(`{"auth":{"accessToken":"at","refreshToken":"rt","expiresAt":1753600000000,"domain":""},"account":{"uid":"ms"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.ExpiresAt != 1753600000 {
+		t.Fatalf("in-memory must be seconds, got %d", a.ExpiresAt)
+	}
+	a.FilePath = msFile
+	if err := a.SaveAtomic(); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(msFile)
+	if !strings.Contains(string(raw), "1753600000000") {
+		t.Errorf("ms source must round-trip as ms: %s", raw)
+	}
+	// 再解析仍得秒（幂等）。
+	again, err := Parse(raw)
+	if err != nil || again.ExpiresAt != 1753600000 {
+		t.Errorf("reparse: %+v %v", again, err)
+	}
+
+	// 秒来源：落盘仍为秒（不被放大成毫秒）。
+	secFile := filepath.Join(dir, "workbuddy-sec.json")
+	b, err := Parse([]byte(`{"auth":{"accessToken":"at","refreshToken":"rt","expiresAt":1753600000,"domain":""},"account":{"uid":"sec"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.FilePath = secFile
+	if err := b.SaveAtomic(); err != nil {
+		t.Fatal(err)
+	}
+	raw2, _ := os.ReadFile(secFile)
+	if !strings.Contains(string(raw2), "1753600000") || strings.Contains(string(raw2), "1753600000000") {
+		t.Errorf("sec source must round-trip as sec: %s", raw2)
+	}
+
+	// 面板新建（非 Parse 来源）：expiresAtMs 为 false → 写秒。
+	newFile := filepath.Join(dir, "workbuddy-new.json")
+	c := &Auth{AccessToken: "at", UID: "new", ExpiresAt: 1753600000, FilePath: newFile}
+	if err := c.SaveAtomic(); err != nil {
+		t.Fatal(err)
+	}
+	raw3, _ := os.ReadFile(newFile)
+	if !strings.Contains(string(raw3), "1753600000") {
+		t.Errorf("fresh auth must write seconds: %s", raw3)
+	}
+}

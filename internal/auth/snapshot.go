@@ -8,7 +8,7 @@ func (a *Auth) Snapshot(refresh bool) *Auth {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	s := &Auth{AccessToken: a.AccessToken, ExpiresAt: a.ExpiresAt, Domain: a.Domain, realm: a.realmLocked(), UID: a.UID, EnterpriseID: a.EnterpriseID, Nickname: a.Nickname, DeviceToken: a.DeviceToken}
+	s := &Auth{AccessToken: a.AccessToken, ExpiresAt: a.ExpiresAt, Domain: a.Domain, realm: a.realmLocked(), UID: a.UID, EnterpriseID: a.EnterpriseID, Nickname: a.Nickname, DeviceToken: a.DeviceToken, expiresAtMs: a.expiresAtMs}
 	if refresh {
 		s.RefreshToken = a.RefreshToken
 	}

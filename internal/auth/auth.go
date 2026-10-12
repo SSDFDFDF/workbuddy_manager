@@ -49,6 +49,17 @@ type Auth struct {
 	// 所有出站请求直连（全站路径经 upstream.tagProxy 统一闸口）。用指针区分「未设置」
 	// 与「显式 false」，避免给旧 auth 文件强加键。
 	useProxy *bool
+
+	// expiresAtMs 报告 ExpiresAt 的来源单位：源文件写的是毫秒时间戳时为 true。
+	// 仅由 Parse 设置，且**刻意跨 refresh 保留**——文件一旦是毫秒形态（桌面端/插件
+	// 写就的），每次写回都必须仍是毫秒，单位不能在刷新后悄悄翻转。
+	// 非 Parse 来源（面板新建/面板登录/cockpit 导入）为零值 false → 写秒（本项目原生单位）。
+	//
+	// 为什么要记单位：Parse 把毫秒归一到秒（内存态恒为秒），但**写回时必须按原单位**
+	// 落盘——桌面端/插件读同一个文件，若把它的毫秒值改写成秒，客户端会把
+	// 1753600000 当成 1970-01-21 的毫秒时间戳 → 认为凭证早已过期 → 反复重登。
+	// 归一（读）与保单位（写）是一对，缺后者就是双向共用一个文件时的静默互踩。
+	expiresAtMs bool
 }
 
 // Lock 供同进程内其他包（upstream.RefreshToken）在改写 Auth 字段期间加锁。
@@ -356,7 +367,41 @@ func Parse(raw []byte) (*Auth, error) {
 	if strings.TrimSpace(a.AccessToken) == "" {
 		return nil, fmt.Errorf("parse_error: missing accessToken")
 	}
+	// expiresAt 单位归一 + 记录原文单位（详见 NormalizeExpiresAt / expiresAtMs 注释）。
+	a.expiresAtMs = isMilliExpiresAt(a.ExpiresAt)
+	a.ExpiresAt = NormalizeExpiresAt(a.ExpiresAt)
 	return &a, nil
+}
+
+// expiresAtMsThreshold 毫秒判别阈：任何大于此值的 expiresAt 只可能是毫秒——
+// 1e11 秒 = 公元 5138 年，没有真实 token 会到那么远；而毫秒形态的近期过期
+// 时间戳约 1.7e12，远大于阈。正常秒值（~1.7e9）远小于阈，原样返回。
+const expiresAtMsThreshold = int64(1e11)
+
+func isMilliExpiresAt(v int64) bool { return v > expiresAtMsThreshold }
+
+// NormalizeExpiresAt 把毫秒时间戳归一到 Unix 秒（幂等：秒值原样返回）。
+//
+// 为什么要归一：桌面端状态文件把 expiresAt 存为毫秒（Date.now()+1000*expiresIn），
+// 而本项目全程用 Unix 秒。不归一的话毫秒值会被当成公元 5000+ 年的远期秒值，
+// NeedsRefresh 恒假 → token 到真失效也不刷新。
+//
+// 为什么导出：panel 导入等其它入参入口复用同一判据，避免各自手写 `/1000` 造成
+// 口径漂移（无条件 /1000 会把已是秒的值打成 1970 年 → NeedsRefresh 恒真 → 刷新风暴）。
+func NormalizeExpiresAt(v int64) int64 {
+	if isMilliExpiresAt(v) {
+		return v / 1000
+	}
+	return v
+}
+
+// expiresAtForWrite 返回按**源文件单位**落盘的 expiresAt：来源是毫秒文件（expiresAtMs）
+// 则写回毫秒，否则写秒。内存态 ExpiresAt 恒为秒。仅限**已持 a.mu** 的调用方使用。
+func (a *Auth) expiresAtForWrite() int64 {
+	if !a.expiresAtMs {
+		return a.ExpiresAt
+	}
+	return a.ExpiresAt * 1000
 }
 
 // SaveAtomic 以嵌套形原子写回 FilePath（tmp + rename），保持嵌套形（插件可读）格式。
@@ -375,7 +420,7 @@ func (a *Auth) SaveAtomic() error {
 		"auth": map[string]any{
 			"accessToken":  a.AccessToken,
 			"refreshToken": a.RefreshToken,
-			"expiresAt":    a.ExpiresAt,
+			"expiresAt":    a.expiresAtForWrite(),
 			"domain":       a.Domain,
 			"realm":        a.realm,
 		},
