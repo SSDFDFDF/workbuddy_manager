@@ -471,6 +471,7 @@ export function ConfigView() {
                   ['travel_enabled', 'travel_hours', '猫猫旅行', '旅行时点（小时）', '9, 21', '一趟派出 + 一趟领奖闭环巡检'],
                   ['activity_enabled', 'activity_hours', '活跃上报', '上报时点（小时）', '10', '点亮连续登录并解锁领养前置'],
                   ['balance_refresh_enabled', 'balance_refresh_minutes', '后台刷新余额', '刷新间隔（分钟）', '5', '周期性拉取各账号最新余额'],
+                  ['token_refresh_enabled', 'token_refresh_minutes', 'Token 到期前兜底刷新', '扫描间隔（分钟）', '10', '周期性扫描，剩余不足 24h 即续期（覆盖无流量账号）'],
                   ['growth_enabled', 'growth_hours', '成长任务自动执行', '执行时点（小时）', '1', '每日到点自动扫描 + 执行全部待办（建议零点后）'],
                 ] as const
               ).map(([en, hours, name, hLabel, ph, hint]) => (

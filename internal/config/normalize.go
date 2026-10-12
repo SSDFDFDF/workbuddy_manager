@@ -180,6 +180,14 @@ func (c *Config) normalize() error {
 		}
 		c.BalanceRefreshInterval = time.Duration(c.Schedule.BalanceRefreshMinutes) * time.Minute
 	}
+	// token 到期前兜底刷新：启用时 minutes<=0 回落默认 10；关闭时 interval 保持 0（不启动）。
+	// 与余额刷新同构，避免两套「启用/间隔」语义分叉。
+	if c.Schedule.TokenRefreshEnabled {
+		if c.Schedule.TokenRefreshMinutes <= 0 {
+			c.Schedule.TokenRefreshMinutes = 10
+		}
+		c.TokenRefreshInterval = time.Duration(c.Schedule.TokenRefreshMinutes) * time.Minute
+	}
 	if err := c.validateScheduleHours(); err != nil {
 		return err
 	}

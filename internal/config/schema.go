@@ -203,6 +203,16 @@ type Config struct {
 		// 解冻语义同签到（余额 > 0 的冷却账号自动解冻），但不做签到不刷 token。
 		BalanceRefreshEnabled bool `json:"balance_refresh_enabled"` // 缺省 true；false = 关闭
 		BalanceRefreshMinutes int  `json:"balance_refresh_minutes"` // 缺省 5；<=0 回落 5
+
+		// token 到期前兜底刷新（schedule.token_refresh_*）：周期性扫描全部账号，对剩余
+		// 寿命小于 TokenRefreshWindow（24h，对齐官方客户端判据）的号续期。
+		//
+		// 与 keepalive_hours 的分工：keepalive 是「每天到点把所有号无差别续一遍」，
+		// 本扫描是「只看即将过期的号」的兜底——keepalive 被关掉（或某号因轮换长期无流量）
+		// 时，到期窗口内仍有入口给它们续期；客户端侧对应 24h 定时器。两着同时开启时，
+		// 常态下本扫描零上游调用（号刚被 keepalive 刷过，剩余寿命远大于 24h）。
+		TokenRefreshEnabled bool `json:"token_refresh_enabled"` // 缺省 true；false = 关闭
+		TokenRefreshMinutes int  `json:"token_refresh_minutes"` // 缺省 10；<=0 回落 10
 	} `json:"schedule"`
 
 	// Growth 成长任务自动化策略（面板「任务中心」/账号「一键完成」/growth 排程共用）。
@@ -368,20 +378,23 @@ type Config struct {
 	ResinAuthVersion  string `json:"resin_auth_version"`  // V1（默认）/ LEGACY_V0，仅正向代理使用
 
 	// 解析后
-	SoftRateDur            time.Duration `json:"-"`
-	SoftRateMaxDur         time.Duration `json:"-"`
-	BreakerCooldownDur     time.Duration `json:"-"`
-	BreakerCooldownMaxD    time.Duration `json:"-"`
-	DegradeCooldownDur     time.Duration `json:"-"`
-	DegradeCooldownMaxD    time.Duration `json:"-"`
-	SessionTTL             time.Duration `json:"-"`
-	SessionGCInterval      time.Duration `json:"-"`
+	SoftRateDur         time.Duration `json:"-"`
+	SoftRateMaxDur      time.Duration `json:"-"`
+	BreakerCooldownDur  time.Duration `json:"-"`
+	BreakerCooldownMaxD time.Duration `json:"-"`
+	DegradeCooldownDur  time.Duration `json:"-"`
+	DegradeCooldownMaxD time.Duration `json:"-"`
+	SessionTTL          time.Duration `json:"-"`
+	SessionGCInterval   time.Duration `json:"-"`
 	// SessionFingerprint 指纹救场开关（session_sticky.fingerprint_enabled，
 	// normalize 阶段从 SessionSticky.FingerprintEnabled 携带；main 装配与
 	// 热改路径只拿归一化后的标量）。
-	SessionFingerprint bool `json:"-"`
+	SessionFingerprint     bool          `json:"-"`
 	BalanceRefreshInterval time.Duration `json:"-"` // 0 = 不启动（enabled=false）
-	ExpiringSoonDur        time.Duration `json:"-"`
+	// TokenRefreshInterval 解析后的到期前兜底扫描间隔（schedule.token_refresh_*）；
+	// 0 = 不启动（enabled=false）。
+	TokenRefreshInterval time.Duration `json:"-"`
+	ExpiringSoonDur      time.Duration `json:"-"`
 	// CostExploreIntervalDur 解析后的 costTier 探索窗口（issue #136）；0 = 关停。
 	CostExploreIntervalDur time.Duration `json:"-"`
 	// ServerReadTimeoutDur 解析后的入站请求读取上限（issue #100）；0 = 不限制。
@@ -503,6 +516,8 @@ func Default() *Config {
 	c.Schedule.BlackcatEnabled = true
 	c.Schedule.BalanceRefreshEnabled = true
 	c.Schedule.BalanceRefreshMinutes = 5
+	c.Schedule.TokenRefreshEnabled = true
+	c.Schedule.TokenRefreshMinutes = 10
 	c.Upstream.TimeoutSeconds = 120
 	// HeaderTimeoutSeconds/IdleTimeoutSeconds 默认 0（未设置态），回落见 normalize()。
 	c.Upstream.HeaderTimeoutSeconds = 0

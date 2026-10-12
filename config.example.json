@@ -58,7 +58,9 @@
     "growth_enabled": true,
     "include_disabled_in_tasks": false,
     "balance_refresh_enabled": true,
-    "balance_refresh_minutes": 5
+    "balance_refresh_minutes": 5,
+    "token_refresh_enabled": true,
+    "token_refresh_minutes": 10
   },
   "growth": {
     "autotasks": {

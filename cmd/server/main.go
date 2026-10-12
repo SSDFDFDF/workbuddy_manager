@@ -253,6 +253,13 @@ func main() {
 	case cfg.BalanceRefreshInterval > 0:
 		log.Printf("余额后台刷新：每 %s（签到时点照常额外刷新）", cfg.BalanceRefreshInterval)
 	}
+	switch {
+	case !cfg.Schedule.TokenRefreshEnabled:
+		log.Printf("token 到期前兜底刷新已禁用（schedule.token_refresh_enabled=false）")
+	case cfg.TokenRefreshInterval > 0:
+		log.Printf("token 到期前兜底刷新：每 %s（剩余 <%s 即续期，覆盖无流量账号）",
+			cfg.TokenRefreshInterval, scheduler.TokenRefreshWindow)
+	}
 	if cfg.Schedule.IncludeDisabledInTasks {
 		log.Printf("保号任务覆盖禁用账号（schedule.include_disabled_in_tasks=true）：禁用号仍签到 / 活跃 / 保活 / 刷新余额，但不参与选号")
 	}
@@ -396,6 +403,7 @@ func main() {
 	defer stopIngressLog()
 	go sch.Run(ctx)
 	sch.StartBalanceRefresh(ctx, cfg.BalanceRefreshInterval)
+	sch.StartTokenRefresh(ctx, cfg.TokenRefreshInterval)
 
 	// 启动即预热模型目录快照 + 积分倍率表（同一次探测，见 warmModelCatalog）：
 	//   - 目录快照是出站门禁与 /v1/models 的唯一事实来源，不预热则门禁一直
@@ -738,6 +746,7 @@ func saveConfigTx(raw []byte, path string, hot *hotTargets) ([]string, error) {
 		!newCfg.Schedule.ActivityEnabled, !newCfg.Schedule.KeepaliveEnabled, !newCfg.Schedule.BlackcatEnabled,
 		!newCfg.Schedule.GrowthEnabled)
 	sch.SetBalanceInterval(newCfg.BalanceRefreshInterval)
+	sch.SetTokenRefreshInterval(newCfg.TokenRefreshInterval)
 	sch.SetIncludeDisabledInTasks(newCfg.Schedule.IncludeDisabledInTasks)
 	// 夜猫子计数窗口热生效（growth.autotasks.tasks.black_cat.window）：与面板侧动作同源。
 	sch.SetBlackcatWindow(blackcatWindowFrom(newCfg))

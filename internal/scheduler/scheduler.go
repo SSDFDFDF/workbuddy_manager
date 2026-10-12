@@ -79,15 +79,32 @@ type Scheduler struct {
 	adoptTried map[string]string
 
 	// schedMu 保护排程参数（时点/开关）；Reconfigure 可在运行期热改（面板保存配置时调用）。
-	// rearmSchedule/rearmBalance 是「排程已变，立即重算」通知：Run 与余额刷新循环各自消费，
-	// 分别用独立 channel（同 channel 被两个 select 消费会丢信号）。
-	schedMu       sync.Mutex
-	rearmSchedule chan struct{}
-	rearmBalance  chan struct{}
+	// rearmSchedule/rearmBalance/rearmTokenRefresh 是「排程已变，立即重算」通知：
+	// Run 与两个刷新循环各自消费，分别用独立 channel（同 channel 被多个 select 消费会丢信号）。
+	schedMu           sync.Mutex
+	rearmSchedule     chan struct{}
+	rearmBalance      chan struct{}
+	rearmTokenRefresh chan struct{}
 
 	// balanceInterval 余额刷新间隔（纳秒，0=暂停）。atomic 读写：执行循环每轮读当前值，
 	// SetBalanceInterval 可任意时刻热改（面板保存配置）。
 	balanceInterval atomic.Int64
+
+	// tokenRefreshInterval 到期前兜底扫描间隔（纳秒，0=暂停）。atomic 读写，语义同
+	// balanceInterval（面板可热改）。
+	tokenRefreshInterval atomic.Int64
+
+	// refreshMu 串行化「保号类 token 刷新」的两个入口：整点保活（RunKeepaliveNow）
+	// 与到期前兜底扫描（RunTokenRefreshNow）。
+	//
+	// 为什么要互斥：两者共用 12153 的**连续计数**（NoteSessionDead 是无条件 ++，
+	// 不去重）。若同一号在同一次故障上被两个入口各刷一次，计数就 +2，把 3 次才禁用的
+	// 阈值实际降成 2 次——正是 P0-1 要防的误判方向（13 个 disabled 号全是历史误判）。
+	// 顺带兔掉同号的重复上游调用（RefreshToken 单飞只去重并发请求，不阻止先后两次）。
+	//
+	// 保活用 Lock（权威日任务，必须真跑，宁可排队）；兜底扫描用 TryLock + 跳过
+	// （机会性任务，跳过无害：保活刷的正是全量、含临期号，且下一轮 10min 后再来）。
+	refreshMu sync.Mutex
 }
 
 // New 构建。
@@ -108,10 +125,11 @@ func New(cfg Config) *Scheduler {
 		cfg.BlackcatHours = []int{23}
 	}
 	return &Scheduler{
-		cfg:           cfg,
-		adoptTried:    make(map[string]string),
-		rearmSchedule: make(chan struct{}, 1),
-		rearmBalance:  make(chan struct{}, 1),
+		cfg:               cfg,
+		adoptTried:        make(map[string]string),
+		rearmSchedule:     make(chan struct{}, 1),
+		rearmBalance:      make(chan struct{}, 1),
+		rearmTokenRefresh: make(chan struct{}, 1),
 	}
 }
 
@@ -603,6 +621,34 @@ func (s *Scheduler) checkActivityStreak(a *auth.Auth) bool {
 	return false
 }
 
+// refreshAccountOnce 对单账号执行一次 token 刷新 + 落盘 + 12153 连续计数处置。
+// 返回是否刷新成功。
+//
+// 抽成公共实现供两个入口复用：整点 keepalive（RunKeepaliveNow，无差别全量刷新）
+// 与到期前兜底扫描（RunTokenRefreshNow，仅刷即将过期者）。二者必须共享同一套
+// ErrSessionDead 计数/清零/落盘语义——否则「keepalive 刷失败的号算 1 次、兜底扫描
+// 刷失败的不算」这类分叉会让 3 次禁用阈值随入口漂移。
+//
+// noteDead 控制是否喂 12153 连续计数：已禁用账号（轮换用法的闲置号）不喂——它是终态，
+// 再计一次只会打出一行「— 禁用」的误导日志（keepalive 的既有语义，此处保持）。
+func (s *Scheduler) refreshAccountOnce(st pool.Status, a *auth.Auth, tag string, noteDead bool) bool {
+	if err := s.cfg.Upstream.RefreshToken(a); err != nil {
+		log.Printf("%s %s: %v", tag, logfmt.Label(st.UID, st.Nickname), err)
+		var ue *upstream.Error
+		if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead && noteDead {
+			if s.cfg.Pool.NoteSessionDead(st.UID) {
+				log.Printf("%s %s: 连续 %d 次 12153 session dead — 禁用", tag, logfmt.Label(st.UID, st.Nickname), pool.SessionDeadThreshold())
+			}
+		}
+		return false
+	}
+	s.cfg.Pool.ClearSessionDead(st.UID) // 刷新成功清误判计数，失败不该累计
+	if err := a.SaveAtomic(); err != nil {
+		log.Printf("%s %s save: %v", tag, logfmt.Label(st.UID, st.Nickname), err)
+	}
+	return true
+}
+
 // RunKeepaliveNow 立即对所有账号刷新 token；session 死亡的自动禁用。
 // 禁用账号默认跳过；若 schedule.include_disabled_in_tasks 打开，禁用号也会续期 token
 // （这是轮换用法下把闲置号保持可用的关键），但**不再对已禁用的号重复计数 12153**——
@@ -611,6 +657,8 @@ func (s *Scheduler) checkActivityStreak(a *auth.Auth) bool {
 // 连续 sessionDeadThreshold 次（3 次）才禁用（P0-1：13 个 disabled 号全是历史误判）。
 // 刷新成功 → ClearSessionDead 清计数（错误判定的账号有复活路径）。
 func (s *Scheduler) RunKeepaliveNow() {
+	s.refreshMu.Lock()
+	defer s.refreshMu.Unlock()
 	includeDisabled := s.includeDisabledInTasks()
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled && !includeDisabled {
@@ -620,20 +668,52 @@ func (s *Scheduler) RunKeepaliveNow() {
 		if a == nil || a.RefreshTokenValue() == "" {
 			continue
 		}
-		if err := s.cfg.Upstream.RefreshToken(a); err != nil {
-			log.Printf("keepalive %s: %v", logfmt.Label(st.UID, st.Nickname), err)
-			var ue *upstream.Error
-			if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead && !st.Disabled {
-				if s.cfg.Pool.NoteSessionDead(st.UID) {
-					log.Printf("keepalive %s: 连续 %d 次 12153 session dead — 禁用", logfmt.Label(st.UID, st.Nickname), pool.SessionDeadThreshold())
-				}
-			}
+		s.refreshAccountOnce(st, a, "keepalive", !st.Disabled)
+	}
+}
+
+// TokenRefreshWindow 到期前兜底扫描的提前量（剩余寿命小于它即刷新）。
+// 取 24h 对齐官方客户端 scheduleRefreshSession 的判据 expiresAt-864e5<now：
+// 客户端在剩余寿命不足 24h 时把刷新节奏从「每天一次」切到「每 5 分钟一次」，
+// 即在最后一次有效刷新窗口内反复续期。本值只需覆盖「扫描间隔 + 网络重试余量」，
+// 24h 与之同量级且留足重试空间。
+//
+// 只看 accessToken 寿命、不跟踪 refreshExpiresIn/refreshExpiresAt：刷新响应的
+// 这两个字段官方客户端也**只存不用**（全仓无任何比较，实测），且默认开启的
+// keepalive 每日续期已把它们持续刷新。若日后实测发现 refreshToken 寿命短于
+// accessToken（即长期不开 keepalive 会让号真正死掉），需在这里一并考虑。
+const TokenRefreshWindow = 24 * time.Hour
+
+// RunTokenRefreshNow 到期前兜底刷新：仅刷新剩余寿命小于 TokenRefreshWindow 的账号。
+//
+// 与 RunKeepaliveNow（整点无差别全刷）互补：keepalive 是「每天到点把所有号续一遍」，
+// 但若 keepalive 被关闭（schedule.keepalive_enabled=false）或某号因选号/轮换长期无流量，
+// 到期窗口内就没人给它续期——客户端有 24h 定时器兜底，本扫描即 manager 侧的对应物。
+//
+// 判据用 NeedsRefresh(window)（now+window >= ExpiresAt）：已过期、无 expiry（<=0）
+// 都算「需刷新」，与请求路径的 RefreshSkew 前置刷新同一语义，不会漏号。
+func (s *Scheduler) RunTokenRefreshNow() {
+	// 另一入口（保活 / 面板手动触发）正在刷新：本轮直接跳过。那个入口刷的是全量
+	// （含本扫描的目标号），重叠只会重复喂 12153 计数 + 重复上游调用；本扫描是
+	// 机会性的，下一轮再来即可（间隔默认 10min，远小于 24h 提前量）。
+	if !s.refreshMu.TryLock() {
+		log.Printf("token-refresh: 跳过本轮（另一 token 刷新入口正在运行）")
+		return
+	}
+	defer s.refreshMu.Unlock()
+	includeDisabled := s.includeDisabledInTasks()
+	for _, st := range s.cfg.Pool.List() {
+		if st.Disabled && !includeDisabled {
 			continue
 		}
-		s.cfg.Pool.ClearSessionDead(st.UID) // 刷新成功清误判计数，失败不该累计
-		if err := a.SaveAtomic(); err != nil {
-			log.Printf("keepalive %s save: %v", logfmt.Label(st.UID, st.Nickname), err)
+		a := s.cfg.Pool.AuthByUID(st.UID)
+		if a == nil || a.RefreshTokenValue() == "" {
+			continue
 		}
+		if !a.NeedsRefresh(TokenRefreshWindow) {
+			continue // 剩余寿命充足：不打扰上游（兜底扫描的常态路径）
+		}
+		s.refreshAccountOnce(st, a, "token-refresh", !st.Disabled)
 	}
 }
 
@@ -730,4 +810,67 @@ func (s *Scheduler) SetBalanceInterval(d time.Duration) {
 	}
 	s.balanceInterval.Store(int64(d))
 	poke(s.rearmBalance)
+}
+
+// StartTokenRefresh 到期前兜底刷新的后台循环（独立 ticker goroutine，ctx 取消即停）。
+// 结构逐字对齐 StartBalanceRefresh：interval<=0 时仍然启动循环并进入等待，面板热开启
+// 时调 SetTokenRefreshInterval 并发 rearmTokenRefresh 唤醒（否则「关闭启动 + 热开启」
+// 会因无 goroutine 监听而静默失效）。
+func (s *Scheduler) StartTokenRefresh(ctx context.Context, interval time.Duration) {
+	if interval > 0 {
+		s.tokenRefreshInterval.Store(int64(interval))
+	}
+	go func() {
+		var logged time.Duration
+		// first 表示「本轮先立即扫一遍，再进入定时等待」。两处需要它：
+		//   - 启动：否则首轮要等满一个间隔（默认 10min），而进程若重启得比间隔还频，
+		//     timer 每次都被重建、**永远等不到触发**——兜底扫描对无流量账号的承诺就空了。
+		//   - 热开启：面板刚打开开关就立即生效，不用盯着计时器等一个间隔。
+		first := true
+		for {
+			cur := time.Duration(s.tokenRefreshInterval.Load())
+			if cur != logged {
+				switch {
+				case cur > 0:
+					log.Printf("scheduler: token 到期前兜底刷新每 %s（剩余 <%s 即续期）", cur, TokenRefreshWindow)
+				case logged > 0:
+					log.Printf("scheduler: token 到期前兜底刷新已暂停（间隔 0，可在面板重新开启）")
+				}
+				logged = cur
+			}
+			if cur <= 0 {
+				first = true // 重新启用时也先扫一遍
+				select {
+				case <-ctx.Done():
+					return
+				case <-s.rearmTokenRefresh:
+					continue
+				}
+			}
+			if first {
+				first = false
+				s.RunTokenRefreshNow()
+				continue
+			}
+			timer := time.NewTimer(cur)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-s.rearmTokenRefresh:
+				timer.Stop() // 间隔已变：立刻按新值重算（first 仍为 false，不重复扫）
+			case <-timer.C:
+				s.RunTokenRefreshNow()
+			}
+		}
+	}()
+}
+
+// SetTokenRefreshInterval 热改兜底扫描间隔；<=0 表示暂停循环（面板关闭该开关时）。
+func (s *Scheduler) SetTokenRefreshInterval(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	s.tokenRefreshInterval.Store(int64(d))
+	poke(s.rearmTokenRefresh)
 }

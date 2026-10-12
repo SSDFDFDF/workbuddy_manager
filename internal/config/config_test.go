@@ -693,6 +693,47 @@ func TestBalanceRefreshDefaults(t *testing.T) {
 	}
 }
 
+// TestTokenRefreshDefaults token 到期前兜底刷新的归一化契约（与余额刷新同构）：
+// 缺省启用且 10m；显式 minutes 生效；显式关闭 → interval 归零（不启动）；
+// 启用但 minutes<=0 → 回落默认 10m。
+func TestTokenRefreshDefaults(t *testing.T) {
+	c := Default()
+	if err := c.normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if !c.Schedule.TokenRefreshEnabled || c.TokenRefreshInterval != 10*time.Minute {
+		t.Errorf("default token refresh: enabled=%v interval=%v", c.Schedule.TokenRefreshEnabled, c.TokenRefreshInterval)
+	}
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"schedule":{"token_refresh_minutes":30}}`), 0o600)
+	c2, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.TokenRefreshInterval != 30*time.Minute {
+		t.Errorf("interval=%v want 30m", c2.TokenRefreshInterval)
+	}
+	// 显式关闭：interval 归零（不启动循环）。
+	os.WriteFile(fp, []byte(`{"schedule":{"token_refresh_enabled":false}}`), 0o600)
+	c3, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c3.TokenRefreshInterval != 0 {
+		t.Errorf("disabled interval=%v want 0", c3.TokenRefreshInterval)
+	}
+	// 启用但 minutes<=0 → 回落默认 10m。
+	os.WriteFile(fp, []byte(`{"schedule":{"token_refresh_minutes":-5}}`), 0o600)
+	c4, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c4.TokenRefreshInterval != 10*time.Minute {
+		t.Errorf("fallback interval=%v want 10m", c4.TokenRefreshInterval)
+	}
+}
+
 // TestPromptDefaultNone 默认 prompt.mode=none：不改写客户端 system（零回归）。
 func TestPromptDefaultNone(t *testing.T) {
 	c, err := Load("")

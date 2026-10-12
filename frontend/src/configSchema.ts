@@ -22,6 +22,8 @@ export const CFG_MAP: Record<string, string[]> = {
   keepalive_enabled: ['schedule', 'keepalive_enabled'],
   balance_refresh_enabled: ['schedule', 'balance_refresh_enabled'],
   balance_refresh_minutes: ['schedule', 'balance_refresh_minutes'],
+  token_refresh_enabled: ['schedule', 'token_refresh_enabled'],
+  token_refresh_minutes: ['schedule', 'token_refresh_minutes'],
   include_disabled_in_tasks: ['schedule', 'include_disabled_in_tasks'],
   max_in_flight: ['pool', 'max_in_flight'],
   max_in_flight_global: ['pool', 'max_in_flight_global'],
@@ -105,6 +107,7 @@ export const NUMERIC_CFG = new Set([
   // 数字输入框
   'package_detail_limit',
   'balance_refresh_minutes',
+  'token_refresh_minutes',
   'max_in_flight',
   'max_in_flight_global',
   'breaker_threshold',
