@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
 import { useTimeRange, TimeRangeControl } from '../components/TimeRange';
-import { Kpi, SegBar, Empty, Loading, Pager } from '../components/ui';
+import { Kpi, Empty, Loading, Pager } from '../components/ui';
 import { StackedBars, toChartPoints } from '../components/StackedBars';
 import { btnXs } from '../components/buttons';
 import type { UsageRow, UsageSnapshot } from '../types';
@@ -18,44 +18,63 @@ function sortRows(rows: UsageRow[], sort: string): UsageRow[] {
   return [...rows].sort((a, b) => val(b) - val(a));
 }
 
-/* 明细一行：名称 + 域（可选）+ 请求/失败/Token 构成条 + 性能（可选）。 */
+/* 明细一行：名称 + 域（可选）+ 请求/失败/Token 构成徽章 + 性能（可选），单行紧凑布局。 */
 function DimRow({ x, withRealm, withPerf }: { x: UsageRow; withRealm: boolean; withPerf: boolean }) {
   const tt = Number(x.total_tokens || 0);
   const pt = Number(x.prompt_tokens || 0);
   const ct = Number(x.completion_tokens || 0);
   const uid = String(x.key || '');
+  const shortUid = uid.slice(0, 8);
+  const nick = x.nickname || x.extra || '';
   return (
-    <tr className="transition-colors hover:bg-[var(--surface-2)]/60">
-      <td className="px-3.5 py-2.5">
+    <tr className="transition-colors hover:bg-[var(--surface-2)]/60 whitespace-nowrap">
+      <td className="px-3.5 py-2 align-middle">
         {withRealm ? (
-          <>
-            <div className="font-medium text-[var(--ink)]">{x.nickname || uid.slice(0, 8) || '—'}</div>
-            <div className="text-[11px] text-[var(--ink-3)] font-[family-name:var(--mono)]">{x.extra || uid.slice(0, 8)}</div>
-          </>
+          <div className="flex items-center gap-2">
+            <span className="font-medium text-[var(--ink)]">{nick || shortUid || '—'}</span>
+            {shortUid && (
+              <span
+                className="rounded border border-[var(--line-soft)] bg-[var(--surface-2)] px-1.5 py-0.5 font-[family-name:var(--mono)] text-[11px] leading-tight text-[var(--ink-3)]"
+                title={uid}
+              >
+                {shortUid}
+              </span>
+            )}
+          </div>
         ) : (
           <span className="font-[family-name:var(--mono)] text-[12.5px] font-medium text-[var(--ink)]">{x.key || '—'}</span>
         )}
       </td>
-      {withRealm && <td className="tabular px-3.5 py-2.5 text-[var(--ink-2)]">{x.realm || '—'}</td>}
-      <td className="tabular px-3.5 py-2.5 text-[var(--ink)] font-medium">{fmtTok(x.requests)}</td>
-      <td className="tabular px-3.5 py-2.5">{x.errors ? <span className="text-[var(--warn)] font-medium">{fmtTok(x.errors)}</span> : <span className="text-[var(--ink-3)]">—</span>}</td>
-      <td className="tabular px-3.5 py-2.5">
-        <span className="font-semibold text-[var(--ink)]">{fmtTok(tt)}</span>
-        {tt > 0 && (
-          <div className="mt-1 max-w-[160px]">
-            <SegBar
-              segs={[
-                { value: pt, color: 'var(--accent)', title: `读 ${fmtTok(pt)} (${((pt / tt) * 100).toFixed(1)}%)` },
-                { value: ct, color: 'var(--ok)', title: `取 ${fmtTok(ct)} (${((ct / tt) * 100).toFixed(1)}%)` },
-              ]}
-            />
-          </div>
-        )}
+      {withRealm && <td className="tabular px-3.5 py-2 align-middle text-[var(--ink-2)]">{x.realm || '—'}</td>}
+      <td className="tabular px-3.5 py-2 align-middle text-[var(--ink)] font-medium">{fmtTok(x.requests)}</td>
+      <td className="tabular px-3.5 py-2 align-middle">
+        {x.errors ? <span className="text-[var(--warn)] font-medium">{fmtTok(x.errors)}</span> : <span className="text-[var(--ink-3)]">—</span>}
+      </td>
+      <td className="tabular px-3.5 py-2 align-middle">
+        <div className="flex items-center gap-1.5">
+          <span className="font-semibold text-[var(--ink)]">{fmtTok(tt)}</span>
+          {tt > 0 && (
+            <>
+              <span
+                className="inline-flex items-center rounded-md border border-[var(--accent)]/20 bg-[var(--accent-soft)] px-1.5 py-0.5 text-[11px] font-medium leading-tight text-[var(--accent)]"
+                title={`读 ${fmtTok(pt)} (${((pt / tt) * 100).toFixed(1)}%)`}
+              >
+                读 {fmtTok(pt)}
+              </span>
+              <span
+                className="inline-flex items-center rounded-md border border-[var(--ok)]/20 bg-[var(--ok-soft)] px-1.5 py-0.5 text-[11px] font-medium leading-tight text-[var(--ok)]"
+                title={`取 ${fmtTok(ct)} (${((ct / tt) * 100).toFixed(1)}%)`}
+              >
+                取 {fmtTok(ct)}
+              </span>
+            </>
+          )}
+        </div>
       </td>
       {withPerf && (
         <>
-          <td className="tabular px-3.5 py-2.5 text-[var(--ink)]">{fmtMs(x.avg_latency_ms)}</td>
-          <td className="tabular px-3.5 py-2.5 text-[var(--ink-2)]">{fmtRate(x.avg_tokens_per_second)}</td>
+          <td className="tabular px-3.5 py-2 align-middle text-[var(--ink)]">{fmtMs(x.avg_latency_ms)}</td>
+          <td className="tabular px-3.5 py-2 align-middle text-[var(--ink-2)]">{fmtRate(x.avg_tokens_per_second)}</td>
         </>
       )}
     </tr>
@@ -331,7 +350,7 @@ export function UsageView() {
             <div className="overflow-x-auto">
               <table className="w-full border-collapse text-[13px]">
                 <thead>
-                  <tr className="border-b border-[var(--line-soft)] bg-[var(--surface-2)]/50 text-left text-[11.5px] font-semibold text-[var(--ink-2)]">
+                  <tr className="border-b border-[var(--line-soft)] bg-[var(--surface-2)]/50 text-left text-[11.5px] font-semibold text-[var(--ink-2)] whitespace-nowrap">
                     <th className="px-3.5 py-2.5">{dim === 'account' ? '账号' : dim === 'model' ? '模型' : '域'}</th>
                     {dimMeta.withRealm && <th className="px-3.5 py-2.5">域</th>}
                     <th className="px-3.5 py-2.5">请求数</th>
