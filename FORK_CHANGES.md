@@ -229,7 +229,7 @@ image part 与工具名不改（改写会破坏数据或契约）。
 | `X-Agent-Type` 恒发 / `X-Agent-Purpose` 透传 / 专家头透传 | 生效 | 入站值优先；缺省派生规则与官方 `resolveAgentType()` 一致（有 parent = subagent，否则 main）；专家头客户端没给就不发 |
 | 思考请求补 `verbosity: "high"` | 生效 | 门控与官方一致：只在 `reasoning_effort`/`reasoning.effort` 非空或 `thinking.type=enabled` 且客户端自带值缺失时注入（与 `reasoning_summary: auto` 成对）；`off`/`none`/`disabled` 不注入 |
 | 归档 `upstream_kind`/`upstream_code`/`conversation_derived`、`dropped` 带块类型 | 生效 | 只记码不记正文；`dropped` 上限 8 条不变（类型后缀不增加条目数） |
-| `upstream.derive_conversation_id` | **`false`** | 只在「客户端没给会话 id + 网关算出稳定会话键」时派生；派生值只进请求头/缓存键材料，**不返回客户端**，也不污染入站语义（入站仍不伪造）。开启后 A/B 观察到收益再改默认 |
+| `upstream.derive_conversation_id` | **`false`** | 只在「客户端没给会话 id + 网关算出稳定会话键」时派生；派生值只进请求头/缓存键材料，**不返回客户端**，也不污染入站语义（入站仍不伪造）。开启后 A/B 观察到收益再改默认。**连带效果两条**（A/B 解读时须知）：① `acp-connection-id` 与 `prompt_cache_key` 的材料都含 conversation，因此对这些客户端会从「不发」变成「按会话稳定地发」；② 带 `user_id` 的请求仍不派生（反垄断闸：不按 user 维度粘/派生，见 `session.ExtractKey` 契约） |
 
 未做（有意留下，避免一次改动里混入语义变更）：
 
