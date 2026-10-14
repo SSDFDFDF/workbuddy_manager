@@ -16,6 +16,7 @@ func TestConfigureHotSwap(t *testing.T) {
 		ClientName:        "hot-name",
 		DeviceToken:       "hot-token",
 		PassthroughIP:     true,
+		ReplayThinking:    true,
 		ChatBaseCN:        "https://cn.example",
 		ChatBaseGlobal:    "https://g.example",
 		BillingBaseGlobal: "https://b.example",
@@ -25,6 +26,9 @@ func TestConfigureHotSwap(t *testing.T) {
 		ShortTimeout:      5 * time.Second,
 	})
 
+	if !c.ReplayThinkingNow() {
+		t.Fatal("thinking replay not hot-applied")
+	}
 	if got := c.chatBase(nil); got != "https://cn.example" {
 		t.Fatalf("chatBase=%q", got)
 	}
@@ -70,6 +74,9 @@ func TestConfigureHotSwap(t *testing.T) {
 
 	// 再次整体替换：旧值不得残留。
 	c.Configure(Options{ChatBaseCN: "https://cn2.example", ShortTimeout: 9 * time.Second, GlobalEnabled: true})
+	if c.ReplayThinkingNow() {
+		t.Fatal("replacement must disable thinking replay")
+	}
 	if got := c.chatBase(nil); got != "https://cn2.example" {
 		t.Fatalf("替换后 chatBase=%q", got)
 	}
@@ -121,6 +128,7 @@ func TestConfigureConcurrentReads(t *testing.T) {
 				_ = c.globalChatBase()
 				_ = c.globalOn(nil)
 				_ = c.GlobalOn()
+				_ = c.ReplayThinkingNow()
 				_ = c.StreamTimeoutsNow()
 				_ = c.attributionClientName()
 				_ = c.resolveDeviceToken(nil)
@@ -135,6 +143,7 @@ func TestConfigureConcurrentReads(t *testing.T) {
 			ChatBaseGlobal: "https://g.example",
 			ClientName:     "n",
 			GlobalEnabled:  i%2 == 0,
+			ReplayThinking: i%2 == 0,
 			ShortTimeout:   time.Duration(i) * time.Millisecond,
 			StreamTimeouts: StreamTimeoutConfig{FirstModelEvent: time.Duration(i) * time.Second},
 			Profiles:       map[string]IdentityProfile{"cn": {ClientVersion: "1"}},

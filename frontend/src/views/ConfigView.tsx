@@ -698,6 +698,13 @@ export function ConfigView() {
             <h3 className="text-[14px] font-semibold">
               模型思考档位 <span className="ml-1 text-[12px] font-normal text-[var(--ink-3)]">默认档的本地覆盖 · 改完即时生效</span>
             </h3>
+            <SubHead>历史思考回放（实验）</SubHead>
+            {sw('replay_thinking', '回放 Messages 明文 thinking 历史')}
+            <div className="text-[11.5px] leading-relaxed text-[var(--ink-3)]">
+              默认关闭，关闭时仍可在请求日志详情查看明文块计数。开启后仅把客户端已有明文镜像为
+              reasoning/reasoning_content（对齐官方回填规则），不回放不透明块、不验证或生成签名、不输出 thinking 响应块。
+              保存后新请求生效；先用独立测试实例和一个客户端验证，避免会话中途切换。
+            </div>
             <SubHead>默认思考档覆盖（upstream.effort_default_overrides）</SubHead>
             <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11.5px] text-[var(--ink-3)]">
               <span><code>model = 档位</code> 该模型在两个域都用这个默认档</span>

@@ -9,6 +9,7 @@ import { Tag, Empty, Pager } from '../components/ui';
 import { btnXs } from '../components/buttons';
 import { copyText } from '../clipboard';
 import { toast } from '../toast';
+import { requestMatchesQuery } from '../requestSearch';
 import type { LogEntry, RequestEvent, RequestMetrics } from '../types';
 import { fmtMs, fmtTok, fmtBytes, fmtTimeHM, fmtNum, cacheRatePct, cacheRateText } from '../fmt';
 
@@ -294,6 +295,15 @@ function RequestDetailRow({ e, onCopy }: { e: RequestEvent; onCopy: (text: strin
                 <span className="ml-1 text-[var(--ink-2)]">{e.dropped.join(' · ')}</span>
               </div>
             )}
+            {(e.thinking_replay_enabled || e.thinking_plain_blocks || e.thinking_redacted_blocks) ? (
+              <div className="col-span-2 border-t border-[var(--line-soft)] pt-1.5 text-[11.5px]" title="入站历史转换计数，不代表上游接受或缓存命中；不记录思考正文">
+                <span className="font-medium text-[var(--accent)]">思考回放：</span>
+                <span className="ml-1 text-[var(--ink-2)]">
+                  {e.thinking_replay_enabled ? '开启' : '关闭（仅观测）'}
+                  {` · 明文 ${e.thinking_plain_blocks || 0} 块 · 转换 ${e.thinking_replayed_blocks || 0} 块 / ${fmtBytes(e.thinking_replayed_bytes || 0)} · 不透明跳过 ${e.thinking_redacted_blocks || 0} 块`}
+                </span>
+              </div>
+            ) : null}
             {/* 上游失败码与会话身份：回答「上游到底回了什么码」（队列 6020 等）与
                 「这次会话身份是客户端给的还是网关派生的」。 */}
             {(e.upstream_kind || e.upstream_code || e.conversation_derived) && (
@@ -435,28 +445,7 @@ export function LogsView() {
   const reqFiltered = useMemo(() => {
     return (reqRows || []).filter((e) => {
       if (outcome && String(e.outcome || '') !== outcome) return false;
-      if (q) {
-        const text = [
-          e.path,
-          e.client_ip,
-          e.user_agent,
-          e.model,
-          e.account,
-          e.request_id,
-          e.prompt_preset,
-          e.prompt_mode,
-          e.prompt_sha256,
-          ...(e.dropped || []),
-          ...(e.rewritten || []),
-        ]
-          .filter(Boolean)
-          .join(' ')
-          .toLowerCase();
-        for (const kw of q.toLowerCase().split(/\s+/).filter(Boolean)) {
-          if (!text.includes(kw)) return false;
-        }
-      }
-      return true;
+      return requestMatchesQuery(e, q);
     });
   }, [reqRows, outcome, q]);
 

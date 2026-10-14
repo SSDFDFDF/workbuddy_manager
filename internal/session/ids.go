@@ -87,16 +87,15 @@ func RequestIDForKey(key string) string {
 // 客户端提供的（conversation_id / 客户端会话头 / prompt_cache_key）或由内容派生。
 const conversationIDDeriveSalt = "wb2c:"
 
-// DerivedConversationID 把网关侧的稳定会话键派生为 UUIDv4 形态的会话 ID
-// （与官方 X-Conversation-ID 同形，如 bbbaf8ac-ae2a-4207-bc33-a558e5a93906）。
-//
-// 仅在“客户端没给会话 id、但网关算出了稳定会话键”且配置显式开启
-// （upstream.derive_conversation_id）时使用；空键返回空串（不伪造）。
-func DerivedConversationID(convKey string) string {
+// DerivedConversationID generates a stable UUID-shaped ID scoped to the gateway
+// principal. Explicit client IDs bypass this function. The fixed domain tag is
+// not a secret; this identifier provides namespacing, not authentication.
+func DerivedConversationID(convKey, principal string) string {
 	if convKey == "" {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(conversationIDDeriveSalt + "|" + convKey))
+	material, _ := json.Marshal([]string{conversationIDDeriveSalt, principal, convKey})
+	sum := sha256.Sum256(material)
 	b := sum[:16]
 	// UUID v4 版本位 + RFC 4122 变体位：上游拿到的是一枚合法 UUIDv4（不靠形态
 	// 也能用，但形态一致的 ID 不会在风控/日志侧显出异常）。
@@ -104,6 +103,42 @@ func DerivedConversationID(convKey string) string {
 	b[8] = (b[8] & 0x3f) | 0x80
 	h := hex.EncodeToString(b)
 	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+}
+
+// ContentConversationKey uses the normalized Chat document for outbound identity,
+// not the legacy coarse sticky key. System/developer contents and the complete
+// first user content are encoded without delimiter ambiguity. History appended
+// after the first user does not change it. Identical openings remain heuristic
+// matches: callers needing distinct conversations must supply an explicit key.
+func ContentConversationKey(obj map[string]any) string {
+	messages, _ := obj["messages"].([]any)
+	var systems []any
+	var user any
+	for _, raw := range messages {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch m["role"] {
+		case "system", "developer":
+			if user == nil {
+				systems = append(systems, m["content"])
+			}
+		case "user":
+			if user == nil {
+				user = m["content"]
+			}
+		}
+	}
+	if user == nil {
+		return ""
+	}
+	material, err := json.Marshal([]any{systems, user})
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(material)
+	return "content:" + hex.EncodeToString(sum[:])
 }
 
 // TurnKey 派生「对话轮级」聚合键：body 里**最后一条** role=="user" 消息的

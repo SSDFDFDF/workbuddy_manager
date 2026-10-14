@@ -286,6 +286,10 @@ type Config struct {
 		// 历史逐字一致）；本项是网关自身的稳定会话身份，用于对齐官方客户端的“同会话
 		// 同身份”前提，需 A/B 观察到命中率/积分收益后再默认开。热生效。
 		DeriveConversationID bool `json:"derive_conversation_id"`
+		// ReplayThinking experimentally maps Messages plaintext thinking history
+		// to assistant.reasoning. Default false; counters remain available when off.
+		// Does not replay redacted data, validate signatures or emit thinking blocks.
+		ReplayThinking bool `json:"replay_thinking"`
 		// EffortDefaultOverrides 模型「默认思考档」的本地覆盖（键 = 模型名，值 = 档位名）。
 		//
 		// 为什么需要：模型目录里的 reasoning.defaultEffort（远端探测）与静态兜底表的

@@ -67,6 +67,7 @@ func responsesRequest(src map[string]any, tools *toolIndex, dropped *[]string) (
 			*dropped = append(*dropped, "include")
 		}
 	}
+	verbosity := ""
 	if v := src["text"]; v != nil {
 		m, err := object(v, "text")
 		if err != nil {
@@ -76,11 +77,13 @@ func responsesRequest(src map[string]any, tools *toolIndex, dropped *[]string) (
 			return nil, err
 		}
 		if v := m["verbosity"]; v != nil {
-			if _, err = stringValue(v, "text.verbosity"); err != nil {
+			verbosity, err = stringValue(v, "text.verbosity")
+			if err != nil {
 				return nil, err
 			}
-			// No verified Chat verbosity control exists; the hint is dropped.
-			*dropped = append(*dropped, "text.verbosity")
+			if verbosity != "low" && verbosity != "medium" && verbosity != "high" {
+				return nil, invalid("text.verbosity", "low, medium or high required")
+			}
 		}
 		if v := m["format"]; v != nil {
 			f, err := object(v, "text.format")
@@ -93,6 +96,9 @@ func responsesRequest(src map[string]any, tools *toolIndex, dropped *[]string) (
 		}
 	}
 	dst := map[string]any{"model": src["model"]}
+	if verbosity != "" {
+		dst["verbosity"] = verbosity
+	}
 	// prompt_cache_key 提升（除名逻辑见函数头 fieldsAccept 处）：会话粘性键链路
 	// 需要它（session.BodyKey 的 prompt_cache_key 级，pi-ai/Codex 类客户端把会话
 	// ID 放这里而非 conversation 维度）。提升为 Chat 顶层字段后由 forwarding.Parse

@@ -146,8 +146,11 @@ func TestClientHintsAndReasoningDropped(t *testing.T) {
 	if r.Chat.PromptCacheKey != "k" {
 		t.Fatal("prompt_cache_key not hoisted to Chat request", r.Chat.PromptCacheKey)
 	}
+	if r.Chat.Object["verbosity"] != "low" || containsString(r.Dropped, "text.verbosity") {
+		t.Fatal("verbosity not adopted", r.Chat.Object, r.Dropped)
+	}
 	raw, _ := json.Marshal(r.Chat.Object)
-	for _, k := range []string{"service_tier", "client_metadata", "stream_options", "safety_identifier", "top_logprobs", "include", "truncation", "verbosity"} {
+	for _, k := range []string{"service_tier", "client_metadata", "stream_options", "safety_identifier", "top_logprobs", "include", "truncation"} {
 		if strings.Contains(string(raw), `"`+k) {
 			t.Fatalf("%s forwarded: %s", k, raw)
 		}
@@ -155,7 +158,7 @@ func TestClientHintsAndReasoningDropped(t *testing.T) {
 	if strings.Contains(string(raw), `"reasoning":`) {
 		t.Fatalf("reasoning object forwarded: %s", raw)
 	}
-	for _, k := range []string{"service_tier", "client_metadata", "stream_options", "safety_identifier", "top_logprobs", "include", "truncation", "text.verbosity", "reasoning.summary", "reasoning.context"} {
+	for _, k := range []string{"service_tier", "client_metadata", "stream_options", "safety_identifier", "top_logprobs", "include", "truncation", "reasoning.summary", "reasoning.context"} {
 		if !containsString(r.Dropped, k) {
 			t.Fatalf("dropped list missing %s: %v", k, r.Dropped)
 		}

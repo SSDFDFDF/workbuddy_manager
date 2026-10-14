@@ -3,11 +3,12 @@ package protocol
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"workbuddy_manager/internal/jsondoc"
 )
 
-func anthropicRequest(src map[string]any, dropped *[]string) (map[string]any, error) {
+func anthropicRequest(src map[string]any, dropped *[]string, thinking *ThinkingReplayStats) (map[string]any, error) {
 	// metadata/service_tier/top_k/cache_control 是客户端遥测、路由与缓存提示，
 	// output_config.format 以外的字段无 Chat 等价物：接受并在 Dropped 里记账。
 	ignored, _ := fieldsAccept(src, "", "model messages system max_tokens stream temperature top_p tools tool_choice thinking stop_sequences output_config", "*")
@@ -63,11 +64,9 @@ func anthropicRequest(src map[string]any, dropped *[]string) (map[string]any, er
 		case "enabled", "adaptive":
 			// adaptive 是官方自适应思考模式（客户端不报 budget，由模型自行决定什么时候
 			// 想）：与 enabled 同口径处理——只校验 budget 形态，状态一律丢弃。
-			// Signed thinking state cannot be replayed by the Chat bridge (the
-			// upstream emits unsigned reasoning text). The request is accepted so
-			// thinking-enabled clients keep working, but the budget/state is
-			// dropped and responses carry no thinking blocks. The model still
-			// reasons per its own defaults.
+			// Budget/adaptive state and signed response blocks are not implemented.
+			// Optional plaintext history replay below is separate from enabling new
+			// reasoning; it neither changes budgets nor creates response signatures.
 			if v := m["budget_tokens"]; v != nil {
 				if n, ok := jsondoc.Int(v); !ok || n <= 0 {
 					return nil, invalid("thinking.budget_tokens", "positive integer required")
@@ -207,6 +206,7 @@ func anthropicRequest(src map[string]any, dropped *[]string) (map[string]any, er
 			return nil, invalid(p+".content", "string or non-empty content array required")
 		}
 		parts, calls := []any{}, []any{}
+		var reasoning strings.Builder
 		for j, v := range blocks {
 			bp := fmt.Sprintf("%s.content[%d]", p, j)
 			b, err := object(v, bp)
@@ -284,21 +284,34 @@ func anthropicRequest(src map[string]any, dropped *[]string) (map[string]any, er
 				if role != "assistant" {
 					return nil, invalid(bp, "thinking blocks require assistant role")
 				}
-				// Signed/opaque reasoning history cannot be represented in Chat;
-				// accept and drop it so thinking-enabled clients can replay their
-				// full transcript. The model re-reasons from the visible messages.
-				//
-				// 归档标记带类型（path:type）：只记路径时面板上看不出“被丢的是一个
-				// thinking 块”——而“思考历史能不能回放”正是思考模型（glm-5.3 这类
-				// onlyReasoning）前缀缓存与成本的关键观测项（此前无法量化）。
-				// 注意：此处**不改语义**（仍是丢弃）；改成映射到 assistant.reasoning
-				// 属于会改变提示词语义的变更，需先用本标记量出频率再小流量验证。
+				// Only caller-supplied plaintext is eligible. Signatures are not
+				// verified or forwarded; opaque/redacted data is never replayed.
+				if typ == "redacted_thinking" {
+					thinking.RedactedBlocks++
+				} else if text, ok := b["thinking"].(string); ok && text != "" {
+					thinking.PlainBlocks++
+					if thinking.Enabled {
+						reasoning.WriteString(text) // preserve whitespace and block order
+						thinking.ReplayedBlocks++
+						thinking.ReplayedBytes += len(text)
+						continue
+					}
+				}
 				*dropped = append(*dropped, bp+":"+typ)
 			default:
-				*dropped = append(*dropped, bp+":"+typ)
+				*dropped = append(*dropped, bp+":"+diagnosticBlockType(typ))
 			}
 		}
-		if len(parts) > 0 || len(calls) > 0 {
+		if reasoning.Len() > 0 {
+			// 官方 reasoning-content-backfill 规则（见 docs/WORKBUDDY_CLIENT_FEATURES_ANALYSIS.md §6.6）：
+			// 内部历史字段 reasoning 在出站前镜像到线协议字段 reasoning_content（对
+			// requiresReasoningContentOnAssistantMessages 的模型，上游校验后者）；官方发送形态是两者并存，
+			// 这里逐字保留同一份文本，不额外加 placeholder。
+			text := reasoning.String()
+			msg["reasoning"] = text
+			msg["reasoning_content"] = text
+		}
+		if len(parts) > 0 || len(calls) > 0 || reasoning.Len() > 0 {
 			msg["content"] = nil
 			if len(parts) > 0 {
 				msg["content"] = parts
@@ -311,6 +324,19 @@ func anthropicRequest(src map[string]any, dropped *[]string) (map[string]any, er
 	}
 	dst["messages"] = messages
 	return dst, nil
+}
+
+// diagnosticBlockType never places arbitrary client text in the request archive.
+func diagnosticBlockType(typ string) string {
+	if len(typ) == 0 || len(typ) > 64 {
+		return "unknown"
+	}
+	for _, c := range typ {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
+			return "unknown"
+		}
+	}
+	return typ
 }
 
 // markToolError makes an Anthropic is_error:true tool result visible to the

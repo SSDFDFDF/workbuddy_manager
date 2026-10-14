@@ -3,6 +3,7 @@ package session
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -153,11 +154,12 @@ func TestTurnRequestIDDerivation(t *testing.T) {
 // （deriveSalt）误用到这条路径，复算值会与实得值不符，本断言即失败。
 func TestDerivedConversationID(t *testing.T) {
 	key := "conv-key-1"
-	first := DerivedConversationID(key)
-	if first != DerivedConversationID(key) {
+	first := DerivedConversationID(key, "principal")
+	if first != DerivedConversationID(key, "principal") {
 		t.Fatalf("derivation must be deterministic: %q", first)
 	}
-	sum := sha256.Sum256([]byte(conversationIDDeriveSalt + "|" + key))
+	material, _ := json.Marshal([]string{conversationIDDeriveSalt, "principal", key})
+	sum := sha256.Sum256(material)
 	b := sum[:16]
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
@@ -177,10 +179,13 @@ func TestDerivedConversationID(t *testing.T) {
 			t.Fatalf("unexpected rune %q in %q", r, first)
 		}
 	}
-	if other := DerivedConversationID("conv-key-2"); other == first {
+	if other := DerivedConversationID("conv-key-2", "principal"); other == first {
 		t.Fatalf("different keys must derive different ids: %q", other)
 	}
-	if DerivedConversationID("") != "" {
+	if DerivedConversationID(key, "other-principal") == first {
+		t.Fatal("principal collision")
+	}
+	if DerivedConversationID("", "principal") != "" {
 		t.Fatal("empty key must not fabricate an id")
 	}
 }
@@ -189,7 +194,7 @@ func TestDerivedConversationID(t *testing.T) {
 // 会话 ID 必须跨重启恒定（期望值写死），而 RequestIDForKey 走进程盐（不写死）。
 func TestDerivedConversationIDStableAcrossRestartSalt(t *testing.T) {
 	// 固定盐口径：同一输入在任何一次测试运行里都必须得到同一个值。
-	if a, b := DerivedConversationID("stable"), DerivedConversationID("stable"); a != b {
+	if a, b := DerivedConversationID("stable", ""), DerivedConversationID("stable", ""); a != b {
 		t.Fatalf("unstable: %q vs %q", a, b)
 	}
 	// 进程盐口径对照：deriveSalt 是运行期随机盐，所以这里只断言长度/自洽，

@@ -63,6 +63,7 @@ var hotAppliedPaths = []string{
 	"upstream.device_token_file",
 	"upstream.passthrough_ip",
 	"upstream.derive_conversation_id",
+	"upstream.replay_thinking",
 	"upstream.chat_base_cn",
 	"upstream.timeout_seconds",
 	"upstream.header_timeout_seconds",

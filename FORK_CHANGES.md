@@ -32,9 +32,10 @@
 | 17 | **原生工具调用标记还原（DSML→tool_calls）** | 上游（DeepSeek 系）在请求**未声明 tools** 时把工具调用吐成全角竖线原生标记文本落进 `content`；本层在响应出站前识别并还原成结构化 `tool_calls`。流式与非流式共用同一帧管线（`consume` 内展开）。判定分两级：名单非空走严格比对，名单为空（tools 丢失常态）走弱判定（块完美闭合 + 工具名形如标识符）。硬前提：本 choice 无结构化 tool_calls（真实调用一律优先让位）、块内不夹带正文；拿不准一律原文回吐，**绝不吞字节**。属 §15 式**显式可见近似变换**：命中写入归档 `rewritten` 列（面板展示）+ 日志一行，非静默改写 | 生效（限 Chat/Responses/Messages 出站路径） |
 | 18 | **模型默认思考档本地覆盖** | 模型「默认档」此前是上游/编译期口径、用户改不了；本项让配置压过它（**本地的覆盖上游配置**）：命中即改 `/v1/models` 与面板宣告的 `reasoning_default_effort`、客户端未带档位时的出站注入、越界档位的回退目标三处（同源一份表）；取值先落到该模型的支持集上（绝不宣告/发出必 400 的档位），越界值不会发出；off/none（关闭思考）拒绝作为默认档；改动进归档 `rewritten` 列 + 日志（非静默）。见 §6 | 未配置 = 完全沿用上游 |
 | 19 | **模型容量队列（6020/6021/6022 + HTTP 202）** | 上游对热门/新模型会先入队再服务。此前 202 被当成 502（`upstream_queue_unsupported`）、业务码落通用 4xx（ErrClient）甚至被限流词表误判成 429 软冷却（**误罚健康账号**）。现按队列语义处理：识别 `code`/`bizCode` 结构化码与 HTTP 202，末端回 **429 + Retry-After**（`data.retry_after` 秒/毫秒两口径归一，或响应头）与带位置/容量/等待时长的 `gateway_hint`；账号**零惩罚、不轮转**（排队与账号健康无关，6020/6021 换号也不缩队）。见 §7 | 生效 |
-| 20 | **派生会话身份 `X-Conversation-ID`** | 官方客户端**总会**发会话 id；第三方客户端（Claude Code / Codex / pi / OpenAI SDK）普遍不带 → 上游看不到「同一会话」，会话维度的上下文缓存/后台归集全落空。本项在「客户端没给 + 网关已算出稳定会话键」时把会话键派生为 UUIDv4 形态出站（`session.DerivedConversationID`，固定盐 → **跨重启稳定**）；只进请求头与缓存键材料，不返回客户端。默认关（A/B 后再定）。见 §7 | `false` |
-| 21 | **出站形态补齐（对齐官方客户端）** | `X-Agent-Type` 恒发（入站优先，缺省按官方规则派生 `subagent`/`main`）；`X-Agent-Purpose` 入站优先（官方同链路也用 `conversation_topic`）；专家模式头 `X-Expert-Id` / `X-Expert-Team-Task` 透传（客户端没给不伪造）；**思考请求**补 `verbosity: "high"`（与官方 `modelSettings.text.verbosity` 同门控：与 `reasoning_summary: auto` 成对出现，非思考请求零改动） | 生效 |
+| 20 | **派生会话身份 `X-Conversation-ID`** | 客户端未给 conversation ID 时，可按主体命名空间 + 显式会话键或规范化首轮内容派生 UUID 形态 ID；包括 Messages 顶层 system。只进上游请求与缓存键材料，不返回客户端。**内容回退是启发式，并非真实会话唯一标识**，相同开场仍可能合并；实际缓存收益尚未验证。见 §7 | `false` |
+| 21 | **出站形态补齐（对齐官方客户端）** | `X-Agent-Type` 恒发（入站优先，缺省按官方规则派生 `subagent`/`main`）；`X-Agent-Purpose` 入站优先（官方同链路也用 `conversation_topic`）；专家模式头 `X-Expert-Id` / `X-Expert-Team-Task` 透传（客户端没给不伪造）；**思考请求**补 `verbosity: "high"`（显式 Chat `verbosity` 或 Responses `text.verbosity` 优先；只对未指定值的思考请求补默认） | 生效 |
 | 22 | **上游失败码与会话身份入观测** | 归档新增 `upstream_kind` / `upstream_code`（如 `model_queued` / `6020`、`model_blocked` / `11102`）与 `conversation_derived`；`dropped` 标记带块类型（`messages[1].content[0]:thinking`）。此前「上游到底回了什么码」「被丢的是不是 thinking 块」在归档里查不到，队列类问题的频率完全无法离线统计 | 生效 |
+| 23 | **明文思考历史回放（实验）** | `upstream.replay_thinking` 将 Messages assistant 的非空明文 `thinking` 镜像为 `reasoning` + 线协议 `reasoning_content`（对齐官方 `reasoning-content-backfill`）；不透明块仍丢弃，不处理签名/响应闭环。关闭时也独立统计明文块数，日志详情显示转换块数/字节数及不透明跳过数。见 §7.4 | `false` |
 
 第 17 条的判定与边界（细节以 `internal/upstream/dsml.go` 文件头为准）：
 
@@ -208,7 +209,7 @@ image part 与工具名不改（改写会破坏数据或契约）。
 - **没有**任何针对具体模型的缓存开关：不发 `cache_control`、不发 `prompt_cache_key`；
   唯一会写 `cache_control` 的规则（`CacheControlFormatRule`）挂在兼容处理层，而该层对
   **官方网关域名直接 `return`**（`isProductGatewayHost`）——即官方产品路径一个缓存标记都不发。
-- 官方的高命中来自三条纪律，而不是机制：
+- 官方代码中的三项稳定性措施（**不能仅由客户端代码推出真实命中率或服务器缓存键算法**）：
   1. **会话身份恒定**：`X-Conversation-ID`（会话内不变）+ `X-Conversation-Request-ID`（一次 user send 内
      所有 tool 轮/重试复用同一值）+ `acp-connection-id`；
   2. **前缀逐字不变**：系统提示词与工具集稳定；工具按 `promptCacheStability` 排序
@@ -216,8 +217,8 @@ image part 与工具名不改（改写会破坏数据或契约）。
      Agent/Skill/Repl…）永远排在最后，避免增删时错位整块前缀；历史消息逐字回放（含 `reasoning`）；
   3. **账号/落点不漂移**：连接级 failover 只换 origin 重放（`NetworkFailover` + `applyPinnedAddress`），
      不换账号。
-- 与「glm-5.3 缓存极低」最相关的两条差异因此是：**会话身份缺失**（第三方客户端不带、网关不伪造）与
-  **思考历史可选回放**（glm-5.3 是 `onlyReasoning` 纯思考模型，思考体量最大）。
+- **会话身份缺失**与**思考历史丢弃**是需要实验验证的候选因素；glm-5.3 声明为
+  `onlyReasoning`。此声明不能证明其思考体量最大，也不能证明补齐身份/回放必然提升缓存。
 - 官方还有一处 glm 专属配置（`product.json` 的 `fillToolCallContentModelWhitelist: ["glm","claude"]`），
   但两个安装包里**没有任何 JS 消费它**（是死配置），且与缓存无关。
 
@@ -225,31 +226,94 @@ image part 与工具名不改（改写会破坏数据或契约）。
 
 | 项 | 默认 | 边界 |
 | --- | --- | --- |
-| 容量队列 429 + Retry-After + hint | 生效 | 只认结构化 `code`/`bizCode`（6020/6021/6022）与 HTTP 202；不猜文案（6022 文案常含 "limit"，会被限流词表误伤）。账号零惩罚、不轮转；`data.retry_after` <1000 视为秒、≥1000 视为毫秒，夹在 [1s, 2h] 之外丢弃 |
-| `X-Agent-Type` 恒发 / `X-Agent-Purpose` 透传 / 专家头透传 | 生效 | 入站值优先；缺省派生规则与官方 `resolveAgentType()` 一致（有 parent = subagent，否则 main）；专家头客户端没给就不发 |
-| 思考请求补 `verbosity: "high"` | 生效 | 门控与官方一致：只在 `reasoning_effort`/`reasoning.effort` 非空或 `thinking.type=enabled` 且客户端自带值缺失时注入（与 `reasoning_summary: auto` 成对）；`off`/`none`/`disabled` 不注入 |
-| 归档 `upstream_kind`/`upstream_code`/`conversation_derived`、`dropped` 带块类型 | 生效 | 只记码不记正文；`dropped` 上限 8 条不变（类型后缀不增加条目数） |
-| `upstream.derive_conversation_id` | **`false`** | 只在「客户端没给会话 id + 网关算出稳定会话键」时派生；派生值只进请求头/缓存键材料，**不返回客户端**，也不污染入站语义（入站仍不伪造）。开启后 A/B 观察到收益再改默认。**连带效果两条**（A/B 解读时须知）：① `acp-connection-id` 与 `prompt_cache_key` 的材料都含 conversation，因此对这些客户端会从「不发」变成「按会话稳定地发」；② 带 `user_id` 的请求仍不派生（反垄断闸：不按 user 维度粘/派生，见 `session.ExtractKey` 契约） |
+| 容量队列 429 + Retry-After + hint | 生效 | 结构化 `code`/`bizCode`/`biz_code` 共用最浅信封优先规则，亦接受 HTTP 202。尚未输出正文时，HTTP 错误、200 JSON、首帧 SSE 均返回 429；有效 HTTP 等待头优先于 body，向上取整到秒，hint 同源。body 为完整非负整数，<1000 按秒、≥1000 按毫秒，范围 [1s,2h]，乘法前检查上限。202 无 code 仍可读取位置/等待信息；已开流只发协议错误事件，不重放、不罚号、不轮转 |
+| `X-Agent-Type` 恒发 / `X-Agent-Purpose` 透传 / 专家头透传 | 生效 | 入站值优先；缺省有 parent = subagent，否则 main；专家头客户端没给就不发 |
+| 思考请求补 `verbosity: "high"` | 生效 | 只在最终思考开启且缺少显式 verbosity 时注入。Responses `text.verbosity` 的 low/medium/high 映射到出站字段；关闭思考时不补默认，但保留显式值。`reasoning_summary` 的既有注入并非同一门控 |
+| 归档 `upstream_kind`/`upstream_code`/`conversation_derived`、`dropped` 带块类型 | 生效 | kind/code 成对记录**最终 attempt**，成功清空；不是每次尝试的历史。只记有界码，不记正文。`dropped` 最多 8 项、每项 160 字节；未知块类型仅接受 ≤64 字节标识符，否则记 unknown。日志页可搜索上游码与分类 |
+| `upstream.derive_conversation_id` | **`false`** | 显式 conversation ID 原样优先；缺省且通过会话键/user_id 闸时，按 principal + 显式客户端会话键或规范化首轮内容派生。内容材料含首条 user 完整 content 及其前面的 system/developer（含 Anthropic 顶层 system），不改既有粘性键。固定算法使 ID 跨重启稳定，但**相同开场无法区分两次新会话**；可靠隔离应传真实 session ID。ACP 原本就发：开启后对适用请求从随机变为进程内按会话稳定；自动 prompt_cache_key 仅在未提供客户端键且配置 CacheSecret 时新增。普通 user_id 只抑制内容回退；Claude user_id 的 session 段及更高优先级显式键仍可使用 |
+| `upstream.replay_thinking` | **`false`** | 可热改，仅影响 `/v1/messages` 入站明文历史；不改变新生成的 thinking/budget/effort 控制，Chat/Responses 不变。开关和独立计数见 §7.4 |
 
-未做（有意留下，避免一次改动里混入语义变更）：
+错误响应的边界：保留 `code/bizCode/biz_code/message/msg/type/param/requestId/request_id` 安全字段，
+不承诺 raw body 逐字透传，不扩大到任意嵌套 data/凭证/HTML；位置与等待信息经白名单解析后进 hint。
+Anthropic 兼容层保持标准 `type/message`（不输出扩展 hint），但尚未开流时同样携带 Retry-After。
+本实现只是**可重试错误处理**，不含官方 `/queue/status`、`/queue/cancel` 轮询生命周期。
 
-- **思考回放**：Anthropic 桥接仍**丢弃** `thinking`/`redacted_thinking`（只是归档标记带上类型以便量化频率）。
-  把 thinking 映射到 assistant 的 `reasoning` 会改变提示词语义（回答风格/长度可能变化），
-  需先用 §7.3 的频率数据 + 小流量质量抽检验证。
+本次复审修正了派生材料：若此前手动开启过实验开关，升级会令派生 ID/自动缓存键变化一次，
+不能把切换窗口内的冷缓存当成长期效果。ACP 仍沿用进程盐，跨重启恒定的保证仅针对派生 conversation ID。
+
+未做（有意留下，避免混入更多语义变更）：
+
+- **思考响应闭环**：Messages 响应仍不交付 thinking 块。本次只支持可选的**入站明文**回放，
+  不产生/验证签名、不回放 `redacted_thinking`，不恢复 Responses reasoning 历史。
 - 逐消息元数据注入（`conversationRequestId`/`messageId`/`entryId`/`model`/`queuePosition`…）、
   连接级 origin failover、`Accept-Encoding: br`。
 
 ### 7.3 怎么判断这些改动值不值（用本仓已有的仪表）
 
-1. **先量化队列与丢弃**（改动前无法离线统计，现已入档）：
-   `request-logs` 里筛 `upstream_code=6020/6021/6022` 与 `dropped` 含 `:thinking` 的记录数——
-   这两个频率直接决定第 19 条与「思考回放」的优先级。
-2. **会话身份 A/B**：`upstream.derive_conversation_id` 开关前后同模型对比
-   「缓存命中率 × 积分/1M Token」（面板「用量」两列同表）；同时看 `conversation_derived` 计数确认生效。
-3. **把折扣算成钱**：逐请求样本回归 `credit ≈ a·miss_tokens + b·hit_tokens + c·completion_tokens`，
-   `a/b` 即上游实际给的缓存折扣；再按
-   `月省 ≈ 月 token × 面板「积分/1M Token」× (1 − 1/折扣) × 命中率提升` 折算。
-4. **回滚口径**：第 20 条一个布尔开关即可回退；第 19/21/22 条是纯增量（不改既有成功路径的字节）。
+1. **统计队列与思考丢弃**：请求 JSONL 按 `upstream_code=6020/6021/6022` 筛最终队列失败；
+   中间 attempt 不是独立归档事件，不能据此计算所有上游错误发生率。
+   思考明文/不透明块优先使用 §7.4 的独立计数。旧记录只能检查 `dropped` 中的
+   `:thinking` 与 `:redacted_thinking`；八项上限会截断，旧记录出现频率仅是下界。
+2. **A/B**：按会话而非逐请求切换，保持同会话策略不变。使用 `conversation_derived` 确认组别，
+   对比同模型/域/倍率及相似输入输出工作量；记录预热和开关迁移窗口。
+   此开关联动 conversation、ACP 与自动缓存键，不能把差值单独归因于某一个头。
+3. **成本口径**：`usage.json` v4 是 (时间、realm、uid、model、rate) 聚合桶，不是逐请求样本。
+   面板积分/1M Token = `credit / credit_tokens × 1,000,000`，包含输出与已享受的缓存折扣，
+   不能作为未命中输入单价。逐请求拟合从 reqlog 取 `credit_known=true`、有效 cache/token
+   记录，使用 `credit ≈ a·cache_miss_tokens + b·cache_hit_tokens + c·completion_tokens`。
+   reqlog 不含 realm/rate，需外部明确分组或使用已固定域/倍率的实验窗口；过滤重试和观测缺失，
+   样本缺少变化时参数可能不可识别，不能声称 a/b 就是真实账单折扣。
+   若 a/b 单位为积分/token，固定工作量的预测为：
+   `月省积分 ≈ 月可缓存输入 token × (a − b) × 命中率提升`。
+   例如 a=1e-6、b=0.2e-6、月输入=1e8、提升=0.1，则约省 **8 积分**。
+   如果使用“积分/百万输入 token”的系数，则还须除以 1,000,000；积分也不能直接当货币。
+   **尚未开展真实上游 A/B，没有已证实的命中率或节省幅度。**
+4. **回滚**：派生会话身份、明文思考回放各有独立布尔开关可关闭；其余改动需要回退代码并重新构建/部署。
+   Agent 头和 verbosity 确实改变成功请求的出站字节，不能称为“成功路径零变化”。
+
+### 7.4 精简思考回放：一个开关 + 请求计数
+
+```json
+{"upstream":{"replay_thinking":false}}
+```
+
+- 面板「配置 → 模型思考档位 → 历史思考回放」可保存开关，**默认关闭**。
+  面板/API 保存后新请求热生效；手工编辑 config.json 不会自动监听，需重启进程生效。
+  每个请求解码时固定策略，内部重试不重新取开关，也不累计重复计数。
+- `false`：保留既有丢弃行为，仅观测。`true`：只把 assistant 的非空字符串 `thinking`
+  逐字镜像到该条消息的 `reasoning` **与线协议字段 `reasoning_content`**（官方
+  `reasoning-content-backfill` 规则的出站形态：内部历史名 `reasoning` 复制到上游真正校验的
+  `reasoning_content`，官方两者并存）——多块按原顺序直接拼接，不插分隔符、不 trim、不摘要。
+  纯 thinking 的 assistant 消息会保留为 `content:null` + 两个 reasoning 字段；工具调用、可见内容照旧。
+  转换层逐字保留；**已有指纹改写层若开启，仍按既有规则处理 reasoning/reasoning_content**，不绕过该策略。
+  未实现官方规则中“为缺失思考的 assistant 消息回填 placeholder”分支（那会影响所有思考请求，
+  不在本开关范围内；当前桥接既有行为同样不回填）。
+- 空/缺失/非字符串 thinking 不回放；`redacted_thinking` 无论是否夹带文字都跳过。
+  签名不验证、不转发、不伪造。此功能不是原生 Anthropic 签名思考支持，也不是开启新一轮思考。
+  上游是否接受/使用该历史字段仍需真实实例验证（对 `requiresReasoningContentOnAssistantMessages`
+  的模型，缺 `reasoning_content` 曾被证实会 400——这也是镜像写线协议字段的原因）。
+- **仅入站转换**：当前 Messages 响应仍无 thinking 块；如果客户端只用本桥且没有自带明文历史，
+  往往没有可回放内容。不会缓存或保存正文补出历史；Chat 自带 reasoning 扩展的既有行为不受影响。
+
+请求日志详情显示以下字段（零值可省略；旧记录无此观测）。仅对进入请求统计阶段的 Messages
+请求计数，解码失败等早期拒绝不计；不受 `dropped` 八项截断影响：
+
+| 字段 | 口径 |
+| --- | --- |
+| `thinking_replay_enabled` | 本请求解码时是否开启（布尔零值省略：关闭时通常不出现该字段） |
+| `thinking_plain_blocks` | assistant 非空明文字符串块数，开/关均计；空白字符串也原样计入 |
+| `thinking_replayed_blocks` | 已复制到规范化 Chat 请求的块数；关闭时为 0 |
+| `thinking_replayed_bytes` | 上述复制文本的 UTF-8 字节总数，**不是 token**，也不是经过指纹改写后的最终字节数；出站会镜像为 `reasoning` + `reasoning_content` 两个字段，故实际出站字节约为其两倍 |
+| `thinking_redacted_blocks` | 跳过的不透明块数 |
+
+不保存正文、签名或不透明数据。转换数**不代表上游已收到/接受，更不代表缓存命中**；
+结合 `attempts`、结果和实际 usage 判断。明文未回放数可由 plain − replayed 得到。
+
+**小流量不做分流系统**：先用独立测试实例、一个自有客户端、一个模型（例如 glm-5.3）。
+先关闭观察是否有明文历史；有样本再按完整测试会话开启，验证真实上游接受和多轮/工具质量。
+同一会话避免中途切换；比较固定任务的错误、延迟、实际已知积分及命中/未命中 token，
+不要同时改预算、身份或缓存策略，也不要为比较复制执行工具请求。
+出现兼容问题关闭开关；缓存收益未实测，回放增加输入，命中率上升也不必然省积分。
 
 ---
 
@@ -259,7 +323,7 @@ image part 与工具名不改（改写会破坏数据或契约）。
 | --- | --- | --- |
 | 2026-10-08 | `e05edb7..d66384d`（5 个实质提交） | 企业版账号能力门控 + 企业额度分流（`get-enterprise-user-usage`）；暂停选号单列统计；到期提醒按到期时间排序；图表 tooltip 归位 `<g>`；夜猫子门控测试时钟钉住；版本号 `1.13.0-panel`。已同时移植上游 5 个测试文件与 2 个前端用例 |
 | 2026-10-11 | 上游 `7595a0a`（能力吸收，非整提交合入） | **原生工具调用标记还原（DSML→tool_calls）**：先在 fork 上用上游生产夹具复现「未声明 tools 时标记泄漏成正文」，确认是 fork 真实能力缺口；按 fork 自身 `StreamOption`/`ConsumeCompletion` 重写还原层（非移植上游 handler 接线），流式/非流式/整包快照共用 `consume` 内帧展开；落地姿态从上游「静默改写」换成 §15 式「显式可见」（归档 `rewritten` + 日志）。上游同批的 `8391a05`（面板按需拉取）不合入：改的是 fork 不存在的 `internal/panel/app.js`，且诉求已被 fork 的 `ExpiryCard` 缓存方案覆盖 |
-| 2026-10-14 | 本仓（客户端逆向对齐，§7） | **容量队列 6020/6021/6022 + HTTP 202** 从 502/通用 4xx 改为 429 + Retry-After + 带量化信息的 `gateway_hint`（账号零惩罚、不轮转）；**派生会话身份** `upstream.derive_conversation_id`（默认关，A/B 用）；`X-Agent-Type` 恒发 + `X-Agent-Purpose`/专家头透传 + 思考请求补 `verbosity=high`；归档新增 `upstream_kind`/`upstream_code`/`conversation_derived`，`dropped` 标记带块类型。依据：5.6.2/5.7.6 官方客户端 bundle 逆向（官方产品路径不发任何缓存标记，高命中来自会话身份恒定 + 前缀逐字不变 + 不换号） |
+| 2026-10-14 | 本仓（客户端逆向对齐，§7） | **容量队列 6020/6021/6022 + HTTP 202** 从 502/通用 4xx 改为 429 + Retry-After + 带量化信息的 `gateway_hint`（账号零惩罚、不轮转）；**派生会话身份** `upstream.derive_conversation_id`（默认关，A/B 用）；`X-Agent-Type` 恒发 + `X-Agent-Purpose`/专家头透传 + 思考请求补 `verbosity=high`；归档新增 `upstream_kind`/`upstream_code`/`conversation_derived`，`dropped` 标记带块类型。依据：5.6.2/5.7.6 官方客户端 bundle 逆向（官方产品路径不发缓存标记；会话、前缀与连接稳定性是实验候选因素，收益未实测） |
 
 > 同步方式：fork 与上游无共同祖先，采用「按文件取上游版本 + 手工 port」，不用 rebase / cherry-pick。
 > 更早的基线 `e05edb7` 为 fork 首次记录差异时的比对点；其后上游提交均已按上表并入。

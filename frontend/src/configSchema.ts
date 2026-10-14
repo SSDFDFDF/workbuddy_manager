@@ -45,6 +45,7 @@ export const CFG_MAP: Record<string, string[]> = {
   timeout_seconds: ['upstream', 'timeout_seconds'],
   header_timeout_seconds: ['upstream', 'header_timeout_seconds'],
   idle_timeout_seconds: ['upstream', 'idle_timeout_seconds'],
+  replay_thinking: ['upstream', 'replay_thinking'],
   cn_client_version: ['upstream', 'profiles', 'cn', 'client_version'],
   cn_cli_version: ['upstream', 'profiles', 'cn', 'cli_version'],
   global_client_version: ['upstream', 'profiles', 'global', 'client_version'],

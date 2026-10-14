@@ -393,14 +393,9 @@ func EncodeObject(obj map[string]any, model string) {
 	} else if effort != "" {
 		obj["reasoning_effort"] = effort
 	}
-	// verbosity：与 reasoning_summary 同源、同门控——官方客户端只在**思考开启**时
-	// 把 modelSettings.text.verbosity 置为 "high"（5.6.2 CLI：thinkingEnabled 分支里
-	// 同时设 reasoning.summary="auto" 与 text.verbosity="high"），SDK 再映射成 body
-	// 的 verbosity（5.7.6 实机抓包逐字可见）。网关此前只补了 reasoning_summary，
-	// 少了这一半；补上后“思考请求的出站形态”与官方一致。
-	//
-	// 门控在思考开启（effort 非空且不是 off，或 thinking.type==enabled）且客户端没自带
-	// verbosity 时注入：非思考请求零行为变化（官方对它们也不发这个字段）。
+	// Reasoning requests default to high verbosity. Explicit Chat verbosity and
+	// Responses text.verbosity (mapped by the bridge) take precedence. Unlike
+	// reasoning_summary above, this default is gated on the final thinking state.
 	if _, ok := obj["verbosity"]; !ok && thinkingEnabledForVerbosity(obj) {
 		obj["verbosity"] = "high"
 	}

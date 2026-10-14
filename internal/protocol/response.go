@@ -52,6 +52,9 @@ func streamError(err error, hint func(string) string) (int, map[string]any) {
 	var fe *upstream.FrameError
 	if errors.As(err, &fe) {
 		body := upstream.ErrorResponse(fe.Kind, fe.Payload)
+		if fe.Kind == upstream.ErrModelQueued {
+			return fe.Status, upstream.QueueErrorResponse(fe.Payload, fe.RetryAfter)
+		}
 		if hint != nil {
 			if h := hint(fe.Payload); h != "" {
 				body["error"].(map[string]any)["gateway_hint"] = h

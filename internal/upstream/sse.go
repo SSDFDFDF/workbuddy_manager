@@ -26,9 +26,10 @@ var errTruncatedStream = errors.New("upstream stream ended without all choice fi
 func IsEmptyStreamError(err error) bool { return errors.Is(err, errEmptyStream) }
 
 type FrameError struct {
-	Payload string
-	Kind    ErrKind
-	Status  int
+	Payload    string
+	Kind       ErrKind
+	Status     int
+	RetryAfter time.Duration // queue delay; HTTP header takes priority over payload
 }
 
 func (e *FrameError) Error() string { return e.Payload }
@@ -758,25 +759,19 @@ func ensureUsageTotal(u map[string]any) map[string]any {
 // errorFrame uses the same classification for HTTP errors and stream errors.
 func errorFrame(obj map[string]any, payload, event string) *FrameError {
 	_, has := obj["error"]
-	code, codePresent := obj["code"]
-	business := codePresent && code != nil && fmt.Sprint(code) != "0"
-	// bizCode：官方桌面端在终帧用 bizCode 报业务码（capacity-queue 读的就是它，
-	// 见 5.6.2 客户端 readCapacityQueueErrorFromTerminal）。不认它 → 队列帧被当成
-	// 普通帧透传，客户端拿到一段无法解析的 fragment。仍以 code 为主：两者都出现时
-	// 取 code，避免重复判定。
-	if !business {
-		if biz, ok := obj["bizCode"]; ok && biz != nil && fmt.Sprint(biz) != "0" {
-			code, business = biz, true
-		}
-	}
-	if !has && !business && event != "error" {
+	_, code := businessEnvelope(obj)
+	if !has && code == "" && event != "error" {
 		return nil
 	}
 	kind := Classify(400, payload)
-	if hasBusinessCode(payload, "6004") {
+	if code == "6004" {
 		kind = ErrSoftRate
 	}
-	return &FrameError{payload, kind, ErrorStatus(kind)}
+	fe := &FrameError{Payload: payload, Kind: kind, Status: ErrorStatus(kind)}
+	if kind == ErrModelQueued {
+		fe.RetryAfter = QueueRetryAfter(payload)
+	}
+	return fe
 }
 func ErrorStatus(k ErrKind) int {
 	switch k {
@@ -913,6 +908,12 @@ func consume(r io.Reader, s *completionState, emit func(sseEvent, map[string]any
 		stop()
 		if err := cause(); err != nil {
 			result = err
+		}
+		var fe *FrameError
+		if errors.As(result, &fe) && fe.Kind == ErrModelQueued {
+			if meta, ok := r.(interface{ queueHeaderDelay() time.Duration }); ok {
+				fe.RetryAfter = queueDelay(fe.Payload, meta.queueHeaderDelay())
+			}
 		}
 	}()
 	br := bufio.NewReaderSize(r, 64*1024)
@@ -1189,7 +1190,12 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 		if errors.As(err, &fe) {
 			status = fe.Status
 			obj = ErrorResponse(fe.Kind, fe.Payload)
-			if hint := frameGatewayHint(hintFn, fe.Payload); hint != "" {
+			if fe.Kind == ErrModelQueued {
+				obj = QueueErrorResponse(fe.Payload, fe.RetryAfter)
+				if !committed {
+					SetQueueRetryAfter(w.Header(), fe.RetryAfter)
+				}
+			} else if hint := frameGatewayHint(hintFn, fe.Payload); hint != "" {
 				obj["error"].(map[string]any)["gateway_hint"] = hint
 			}
 		}
@@ -1215,13 +1221,21 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	return err
 }
 func ErrorResponse(kind ErrKind, payload string) map[string]any {
+	obj, _ := jsondoc.Object([]byte(payload))
+	if inner, ok := obj["error"].(map[string]any); ok {
+		obj = inner
+	}
+	return errorResponseObject(kind, obj)
+}
+
+// errorResponseObject applies the existing safe-field filter to an already
+// selected envelope. Queue serialization selects it using businessEnvelope;
+// other error kinds retain their historical root/direct-error selection.
+func errorResponseObject(kind ErrKind, obj map[string]any) map[string]any {
 	e := map[string]any{"type": "upstream_error", "code": kind.String(), "message": "upstream rejected the request"}
-	if obj, err := jsondoc.Object([]byte(payload)); err == nil {
-		if inner, ok := obj["error"].(map[string]any); ok {
-			obj = inner
-		}
+	if obj != nil {
 		safe := map[string]any{}
-		for _, k := range []string{"code", "message", "msg", "type", "param", "requestId", "request_id"} {
+		for _, k := range []string{"code", "bizCode", "biz_code", "message", "msg", "type", "param", "requestId", "request_id"} {
 			if v, ok := obj[k]; ok {
 				safe[k] = v
 			}

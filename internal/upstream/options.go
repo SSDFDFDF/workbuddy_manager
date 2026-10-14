@@ -34,6 +34,8 @@ type Options struct {
 	// 默认 false = 保持历史行为（客户端没给就不发，不伪造）；开启后官方没有的
 	// 第三方客户端也能获得上游的“同一会话”身份（会话维度上下文缓存/聚合的前提）。
 	DeriveConversationID bool
+	// ReplayThinking only affects Messages plaintext input history; opt-in.
+	ReplayThinking bool
 	// ChatBaseCN CN 域 chat base（空 = 内置默认）。
 	ChatBaseCN string
 	// ChatBaseGlobal / BillingBaseGlobal global 域 base（空 = 内置默认）。
@@ -111,6 +113,12 @@ func (c *Client) StreamTimeoutsNow() StreamTimeoutConfig {
 // （见 Options.DeriveConversationID）。
 func (c *Client) DeriveConversationIDsNow() bool {
 	return c.optsNow().DeriveConversationID
+}
+
+// ReplayThinkingNow is sampled once before request decoding. Configure applies
+// changes to subsequent requests; in-flight retries keep the same history shape.
+func (c *Client) ReplayThinkingNow() bool {
+	return c.optsNow().ReplayThinking
 }
 
 // shortTimeoutNow 当前生效的短 RPC 总时长。

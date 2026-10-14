@@ -97,6 +97,10 @@ func Stream(w http.ResponseWriter, r io.Reader, req *Request, hint func(string) 
 		}
 		status, body := streamError(err, hint)
 		if !started {
+			var fe *upstream.FrameError
+			if errors.As(err, &fe) && fe.Kind == upstream.ErrModelQueued {
+				upstream.SetQueueRetryAfter(w.Header(), fe.RetryAfter)
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(status)
 			if e := json.NewEncoder(w).Encode(ErrorBody(req.Kind, status, body)); e != nil {

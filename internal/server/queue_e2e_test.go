@@ -16,7 +16,7 @@ import (
 //   - 分类为 model_queued、HTTP 429（可重试语义）；
 //   - Retry-After 来自 body 的 data.retry_after（毫秒口径归一成秒）；202 之外的
 //     「429 + 6022/6021 + 文案含 limit」也不得被限流词表抢走；
-//   - body 原文透传（error-passthrough）+ gateway_hint 带位置/容量/等待时长；
+//   - 保留安全业务字段 + gateway_hint 带位置/容量/等待时长（不透传任意原始 body）；
 //   - **不罚账号**：不冷却、不熔断（健康号必须留在池内）。
 func TestModelQueuedEndToEnd(t *testing.T) {
 	up := newFakeUpstream(t, func(string) (int, string, bool) {
@@ -35,7 +35,7 @@ func TestModelQueuedEndToEnd(t *testing.T) {
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("code=%d want 429 (body=%s)", rec.Code, rec.Body.String())
 	}
-	// 1500ms → 2s（+1 秒向上取整，避免客户端刚好卡在边界重试）。
+	// 1500ms → 2s（向上取整；整秒值不额外加一）。
 	if got := rec.Header().Get("Retry-After"); got != "2" {
 		t.Fatalf("Retry-After=%q want 2 (body=%s)", got, rec.Body.String())
 	}
@@ -83,8 +83,8 @@ func TestModelQueuedDoesNotRotate(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("上游被调用 %d 次；队列错误不应轮转", calls)
 	}
-	if got := rec.Header().Get("Retry-After"); got != "4" {
-		t.Fatalf("Retry-After=%q want 4（3s+1s）", got)
+	if got := rec.Header().Get("Retry-After"); got != "3" {
+		t.Fatalf("Retry-After=%q want 3（整秒不额外加一）", got)
 	}
 }
 
@@ -103,7 +103,7 @@ func TestModelQueuedArchived(t *testing.T) {
 
 // TestHTTP202QueuedBecomesRetryable：上游 202（已受理/排队）此前是 502
 // upstream_queue_unsupported（客户端拿到一个不存在的上游故障）；现应 429 + 可重试，
-// 且 QueueCase 的 body 原文透传给客户端。
+// 且队列业务码作为安全诊断字段返回给客户端。
 func TestHTTP202QueuedBecomesRetryable(t *testing.T) {
 	up := newFakeUpstream(t, func(string) (int, string, bool) {
 		return http.StatusAccepted, `{"code":6020,"msg":"queued","data":{"queue_position":2,"retry_after":2}}`, false

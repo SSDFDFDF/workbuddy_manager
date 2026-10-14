@@ -242,7 +242,7 @@ func TestCodexStyleResponsesRequestAccepted(t *testing.T) {
 	if len(s.Recent) != 1 {
 		t.Fatalf("events=%d", len(s.Recent))
 	}
-	want := []string{"client_metadata", "service_tier", "stream_options", "include", "text.verbosity", "reasoning.summary", "input[]"}
+	want := []string{"client_metadata", "service_tier", "stream_options", "include", "reasoning.summary", "input[]"}
 	if !reflect.DeepEqual(s.Recent[0].Dropped, want) {
 		t.Fatalf("dropped=%v want %v", s.Recent[0].Dropped, want)
 	}

@@ -13,10 +13,12 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"workbuddy_manager/internal/jsondoc"
 	"workbuddy_manager/internal/logfmt"
 	"workbuddy_manager/internal/pool"
+	"workbuddy_manager/internal/protocol"
 	"workbuddy_manager/internal/reqlog"
 	"workbuddy_manager/internal/upstream"
 )
@@ -79,10 +81,10 @@ type chatStat struct {
 	promptChars  int
 
 	// 跨协议接受但无法表达的客户端字段（opts 入口采集，出口写入 reqlog.Event）。
-	dropped []string
+	dropped  []string
+	thinking protocol.ThinkingReplayStats // input translation counters, independent of dropped truncation
 
-	// 上游失败的分类与业务码（如 model_queued / 6020）。首次写入优先（首次失败的
-	// 原因才是给客户端看的那个；后续重试可能产生派生失败）。
+	// Final upstream attempt's kind/code, updated together; empty on success.
 	upstreamKind string
 	upstreamCode string
 
@@ -100,28 +102,19 @@ type chatStat struct {
 
 // maxDroppedFields 归档事件保留的“被忽略字段”上限（推理历史等逐项路径会很多）。
 const maxDroppedFields = 8
+const maxDroppedFieldBytes = 160
 
 // maxRewrittenFields 归档事件保留的“改写”上限。改写是「越界档位归一」「标记还原」
 // 这类少数几条（幂等且去重），上限只用于防病态客户端。
 const maxRewrittenFields = 4
 
-// noteRewrite 记录一次主动改写（key:原值→出站值）：去重 + 限长。
-// 为什么不经 droppedFields：改写路径在轮转循环里逐 attempt 产生（多号重试可能命中不同
-// realm 的能力表），而 droppedFields 只在入口调一次；若两者共用一个列表，重试会产生
-// 重复项，且被客户端的遥测字段挤掉最需要被看见的改写记录。
-// noteUpstreamError 记录本次上游失败的分类与业务码（首次写入优先）。
-//
-// 首次优先的理由：客户端最终看到的是**第一次**失败的原因（非 ErrModelBlocked 的
-// 分类一律终止轮转）；后续重试若也失败，其码属于派生现象，写进归档反而误导排障。
+// noteUpstreamError replaces the pair for the latest upstream attempt. A retry
+// may end in a different error, or success; neither may retain the first code.
 func (s *chatStat) noteUpstreamError(kind, code string) {
-	if s.upstreamKind == "" && kind != "" {
-		s.upstreamKind = kind
-	}
-	if s.upstreamCode == "" && code != "" {
-		s.upstreamCode = code
-	}
+	s.upstreamKind, s.upstreamCode = kind, code
 }
 
+// noteRewrite records a bounded, deduplicated parameter rewrite.
 func (s *chatStat) noteRewrite(entry string) {
 	for _, old := range s.rewritten {
 		if old == entry {
@@ -144,6 +137,13 @@ func droppedFields(list []string) []string {
 	out := make([]string, 0, len(list))
 	for _, s := range list {
 		key := collapseIndexes(s)
+		if len(key) > maxDroppedFieldBytes {
+			key = key[:maxDroppedFieldBytes-3]
+			for !utf8.ValidString(key) {
+				key = key[:len(key)-1]
+			}
+			key += "..."
+		}
 		if key == "" || seen[key] {
 			continue
 		}
@@ -476,6 +476,11 @@ func (t *requestTrace) event(status int) reqlog.Event {
 		e.PromptSHA = s.promptSHA
 		e.PromptChars = s.promptChars
 		e.Dropped = s.dropped
+		e.ThinkingReplayEnabled = s.thinking.Enabled
+		e.ThinkingPlainBlocks = s.thinking.PlainBlocks
+		e.ThinkingReplayedBlocks = s.thinking.ReplayedBlocks
+		e.ThinkingReplayedBytes = s.thinking.ReplayedBytes
+		e.ThinkingRedactedBlocks = s.thinking.RedactedBlocks
 		e.Rewritten = s.rewritten
 	}
 	e.ClientIP = t.clientIP

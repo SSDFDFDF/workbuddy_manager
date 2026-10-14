@@ -11,7 +11,6 @@ package upstream
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 )
 
@@ -62,34 +61,7 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 	case ErrModelBlocked:
 		return "upstream has no such model on this backend; switch model or retry on another account"
 	case ErrModelQueued:
-		// 排队是可重试语义，不是请求错误也不是账号问题。文案带上有用的量
-		// （队伍位置 / 队列容量 / 上游明示等待时长），这三项都来自上游 body——
-		// 拿不到就不编造，退中性文案（"retry later"）。
-		if info, ok := ParseQueueInfo(msg); ok {
-			parts := make([]string, 0, 3)
-			if info.Position > 0 {
-				parts = append(parts, fmt.Sprintf("queue position %d", info.Position))
-			}
-			if info.Size > 0 {
-				parts = append(parts, fmt.Sprintf("queue size %d", info.Size))
-			}
-			if info.RetryAfter > 0 {
-				parts = append(parts, fmt.Sprintf("retry after %s", info.RetryAfter))
-			}
-			detail := ""
-			if len(parts) > 0 {
-				detail = " (" + strings.Join(parts, ", ") + ")"
-			}
-			switch info.Code {
-			case QueueCodeFull:
-				return "upstream model capacity queue is full; retry later or pick another model" + detail
-			case QueueCodeUserLimit:
-				return "upstream model queue limit reached for this account; retry later or pick another model" + detail
-			default:
-				return "queued by upstream model capacity queue; the request was accepted but not served yet — retry after the indicated delay" + detail
-			}
-		}
-		return "queued by upstream model capacity queue; the request was accepted but not served yet — retry later or pick another model"
+		return queueHint(msg, 0)
 	case ErrContentBlocked:
 		// 措辞不含 "upstream"：content_blocked 响应有不含上游字样的既有口径
 		// （handler_test 的泄漏守卫），hint 遵守同一口径。

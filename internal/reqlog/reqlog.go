@@ -89,13 +89,17 @@ type Event struct {
 	// 客户端字段，已去重与限长。用途是真实客户端排障：回答“它发了什么被我们丢了”。
 	Dropped []string `json:"dropped,omitempty"`
 
-	// UpstreamKind / UpstreamCode：本次失败的上游分类与业务码（如 model_queued /
-	// 6020、model_blocked / 11102、soft_rate / 6004）。
-	//
-	// 为什么入档：在这两个字段之前，“上游到底回了什么码”只存在于上游层的 stdout
-	// 日志（200 字符截断）或响应正文里，归档层看不到——队列（6020/6021/6022）这类
-	// 新机制的出现频率因此完全无法离线统计（价值评估时只能估）。只记码不记正文，
-	// 不增加隐私面。
+	// Messages input translation only: counters contain no reasoning/signatures.
+	// Replayed counts describe the translated request, not upstream acceptance or
+	// cache hits; inspect Attempts/Outcome/usage for delivery and actual effects.
+	ThinkingReplayEnabled  bool `json:"thinking_replay_enabled,omitempty"`
+	ThinkingPlainBlocks    int  `json:"thinking_plain_blocks,omitempty"`
+	ThinkingReplayedBlocks int  `json:"thinking_replayed_blocks,omitempty"`
+	ThinkingReplayedBytes  int  `json:"thinking_replayed_bytes,omitempty"`
+	ThinkingRedactedBlocks int  `json:"thinking_redacted_blocks,omitempty"`
+
+	// The last completed upstream attempt's classification/code. Replaced as a
+	// pair on each attempt; cleared on success. This is not an attempt history.
 	UpstreamKind string `json:"upstream_kind,omitempty"`
 	UpstreamCode string `json:"upstream_code,omitempty"`
 

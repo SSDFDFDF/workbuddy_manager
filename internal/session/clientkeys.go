@@ -302,14 +302,20 @@ func BodyKey(body []byte, promptCacheKey string) string {
 // BodyKeyObject 在未改变会话材料的原协议解码树上提取键，不修改 obj。
 // 跨协议必须传原始 Source，不能传翻译后的 Chat（字段与派生材料不同）。
 func BodyKeyObject(obj map[string]any, promptCacheKey string) string {
-	if k := bodySessionKeyObj(obj); k != "" {
+	if k := ExplicitBodyKeyObject(obj, promptCacheKey); k != "" {
 		return k
-	}
-	if promptCacheKey != "" {
-		return promptCacheKey
 	}
 	if hasUserIDKey(obj) {
 		return ""
 	}
 	return deriveKey(obj)
+}
+
+// ExplicitBodyKeyObject returns only client-provided session/cache identifiers;
+// unlike BodyKeyObject it never falls back to a content-derived sticky key.
+func ExplicitBodyKeyObject(obj map[string]any, promptCacheKey string) string {
+	if k := bodySessionKeyObj(obj); k != "" {
+		return k
+	}
+	return promptCacheKey
 }

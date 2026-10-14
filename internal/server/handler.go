@@ -556,7 +556,9 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 		out.Error(w, status, "invalid_request", "read body: "+err.Error())
 		return
 	}
-	request, err := protocol.Decode(kind, body)
+	request, err := protocol.DecodeWithOptions(kind, body, protocol.DecodeOptions{
+		ReplayThinking: h.cfg.Upstream.ReplayThinkingNow(),
+	})
 	if err == nil {
 		err = request.Chat.ResolveHeaders(r.Header)
 	}
@@ -624,6 +626,7 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 	// 跨协议入口被忽略的客户端字段（如 Codex 的 include/reasoning 历史/客户端遥测）：
 	// 只写请求归档，用于回答“它发了什么被我们丢了”。
 	st.dropped = droppedFields(request.Dropped)
+	st.thinking = request.Thinking
 	if tr := requestTraceFrom(r); tr != nil {
 		tr.stat = st
 		// 来源在 ServeHTTP 入口采集（此时才知道开关与请求头），此处转交给统计对象，
@@ -678,10 +681,8 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 		sum := sha256.Sum256([]byte(key))
 		principalID = hex.EncodeToString(sum[:16])
 	}
-	// convKey 是去除了 realm/model/principal 维度的"裸会话键"；粘性键 = 维度前缀 +
-	// 裸键。裸键可能来自客户端头/body 键位/派生键，语义隔离靠结构保证：
-	// chatMeta.ConversationID 只读 peek.ConversationID（从不读 convKey），上游
-	// X-Conversation-ID / acp 派生 / 缓存键材料只认真正的会话 id，不伪造。
+	// convKey retains legacy sticky-key semantics. Optional outbound identity uses
+	// its own namespaced material below, not a promotion of this coarse key.
 	convKey := ""
 	if peek.ConversationID != "" {
 		convKey = peek.ConversationID
@@ -869,16 +870,32 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 	//     无 user 消息时退化成本请求级随机——轮转内捕获一次即共享；
 	//   - messageID 在 ChatHeaders 内每条消息生成（消息级独立，无需外部可见）。
 	//
-	// 派生会话 ID（可选，默认关）：官方客户端**总会**带 X-Conversation-ID，而第三方
-	// 客户端（Claude Code / Codex / pi / OpenAI SDK）不带——上游于是无法把同一对话的
-	// 多轮归到一个会话（会话维度的上下文缓存/聚合全部落空）。开启后只在“客户端确实
-	// 没给会话 id、而网关自己算出了稳定会话键（convKey）”时，把 convKey 派生为
-	// UUIDv4 形态的会话 id 出站（不进入响应、不返回客户端）。
+	// Optional outbound identity is a cache/routing experiment, not proof of an
+	// upstream stateful cache. Preserve explicit IDs; otherwise use principal-
+	// scoped client session material or normalized opening content. Identical
+	// openings can still collide, so clients should supply a real session key.
 	conversationID := peek.ConversationID
 	deriveConversationID := false
 	if conversationID == "" && h.cfg.Upstream != nil && h.cfg.Upstream.DeriveConversationIDsNow() && convKey != "" {
-		conversationID = session.DerivedConversationID(convKey)
-		deriveConversationID = true
+		identityKey := session.HeaderSessionKey(r.Header)
+		if identityKey == "" {
+			source := request.Source
+			if source == nil {
+				// Native Chat has no separate Source. Hoisting only changes messages,
+				// so its explicit body session fields remain available in Chat.Object.
+				source = request.Chat.Object
+			}
+			identityKey = session.ExplicitBodyKeyObject(source, request.Chat.PromptCacheKey)
+		}
+		if identityKey != "" {
+			identityKey = "explicit:" + identityKey
+		} else {
+			// convKey != "" above retains the ordinary user_id suppression gate.
+			// Normalized Chat includes Messages.system and exact first-user content.
+			identityKey = session.ContentConversationKey(request.Chat.Object)
+		}
+		conversationID = session.DerivedConversationID(identityKey, principalID)
+		deriveConversationID = conversationID != ""
 	}
 	chatMeta := upstream.ChatMeta{
 		PrincipalID:           principalID,
@@ -1068,6 +1085,7 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 		}
 		// 客户端 IP 按请求传递（PassthroughIP 开启时注入；消除共享字段竞态）。
 		attemptStarted := time.Now()
+		st.noteUpstreamError("", "") // each actual attempt owns its diagnostics
 		rc, status, respBody, terr := h.cfg.Upstream.ChatStreamInput(r.Context(), acct,
 			upstream.ChatInput{Req: &attempt, Raw: attemptRaw, Model: bareModel}, clientIP, chatMeta)
 		// 分类信封一次成型：upstream 已在错误路径返回 *upstream.Error（Kind +
@@ -1216,19 +1234,12 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 			if kind != upstream.ErrModelBlocked {
 				st.status = upstream.ErrorStatus(kind)
 				st.outcome = reqlog.OutcomeHTTPError
-				if uerr.RetryAfter > 0 {
-					w.Header().Set("Retry-After", fmt.Sprint(int(uerr.RetryAfter.Seconds())+1))
-				}
 				errBody := upstream.ErrorResponse(kind, string(respBody))
-				// 队列的 gateway_hint 带可行动的量化信息（队伍位置/容量/等待时长）——
-				// 客户端据此决定“等多久”还是“换模型”，是排队语义不可缺的一半；
-				// 其余分类保持既有形状不变（它们的 hint 仍只在流式 error 帧上附加）。
 				if kind == upstream.ErrModelQueued {
-					if hint := upstream.GatewayHint(kind, string(respBody), h.hintContext(bareModel, reqHasImage)); hint != "" {
-						if em, ok := errBody["error"].(map[string]any); ok {
-							em["gateway_hint"] = hint
-						}
-					}
+					upstream.SetQueueRetryAfter(w.Header(), uerr.RetryAfter)
+					errBody = upstream.QueueErrorResponse(string(respBody), uerr.RetryAfter)
+				} else if uerr.RetryAfter > 0 {
+					w.Header().Set("Retry-After", fmt.Sprint(int(uerr.RetryAfter.Seconds())+1))
 				}
 				out.JSON(w, st.status, errBody)
 				return
@@ -1296,6 +1307,7 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 			default:
 				// 真成功：这一跳读完且上游没有报错，才记成功并让粘性跟上。
 				st.outcome = reqlog.OutcomeSuccess
+				st.noteUpstreamError("", "")
 				h.cfg.Pool.NoteSuccess(acct.UID)
 				// 11102 负缓存清命：该账号该模型实测成功，立即解除避让（不必等 TTL 到期）。
 				// BlockModelClear 按 "11102" reason 前缀识别，只清 11102 条目、不碰 6004 独立冷却。
@@ -1377,7 +1389,12 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 			if errors.As(err, &fe) {
 				h.applyErrorPolicy(acct.UID, fe.Kind, fe.Payload, bareModel, nil)
 				st.noteUpstreamError(fe.Kind.String(), upstream.BusinessCode(fe.Payload))
-				out.JSON(w, fe.Status, upstream.ErrorResponse(fe.Kind, fe.Payload))
+				errBody := upstream.ErrorResponse(fe.Kind, fe.Payload)
+				if fe.Kind == upstream.ErrModelQueued {
+					upstream.SetQueueRetryAfter(w.Header(), fe.RetryAfter)
+					errBody = upstream.QueueErrorResponse(fe.Payload, fe.RetryAfter)
+				}
+				out.JSON(w, fe.Status, errBody)
 				st.status = fe.Status
 			} else {
 				out.Error(w, http.StatusBadGateway, "upstream_parse", err.Error())
@@ -1410,6 +1427,7 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 		writeJSON(w, http.StatusOK, formatted)
 		st.status = http.StatusOK
 		st.outcome = reqlog.OutcomeSuccess
+		st.noteUpstreamError("", "")
 		// 下游交付失败（慢/已断连客户端）：上游确实生成成功，但客户端没拿到正文。
 		// 不区分的话状态码 200 被当成成功，运维在日志/请求记录里根本看不出这次请求
 		// 结果丢在了网关出口。此处只改观测口径：**不得**重放上游（可能重复扣费）。

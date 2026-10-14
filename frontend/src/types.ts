@@ -105,6 +105,12 @@ export interface RequestEvent {
   cache_miss_tokens?: number;
   // dropped：跨协议入口（Responses / Messages）接受但无法表达、因此被忽略的客户端字段。
   dropped?: string[];
+  // Messages history translation counters (no reasoning text/signatures).
+  thinking_replay_enabled?: boolean;
+  thinking_plain_blocks?: number;
+  thinking_replayed_blocks?: number;
+  thinking_replayed_bytes?: number;
+  thinking_redacted_blocks?: number;
   // rewritten：网关主动改写的生成参数（key:原值→出站值），如越界 reasoning effort 归一。
   // 与 dropped 分开：改写是「换了值执行了」，且不会被 dropped 的数量上限挤掉。
   rewritten?: string[];

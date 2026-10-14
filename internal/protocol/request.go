@@ -36,7 +36,24 @@ type Request struct {
 	// hints, newer protocol fields, client-side reasoning state). Keeping the
 	// list makes the lossy translation observable instead of silent.
 	Dropped []string
-	tools   *toolIndex
+	// Thinking counts input history handling, never stores text or signatures.
+	Thinking ThinkingReplayStats
+	tools    *toolIndex
+}
+
+// DecodeOptions is captured once per request; retries reuse the translated body.
+type DecodeOptions struct {
+	ReplayThinking bool // experimental Messages plaintext history -> assistant.reasoning
+}
+
+// ThinkingReplayStats counts only nonempty plaintext candidates and opaque blocks.
+// Bytes are UTF-8 bytes copied into the translated request, not token estimates.
+type ThinkingReplayStats struct {
+	Enabled        bool
+	PlainBlocks    int
+	ReplayedBlocks int
+	ReplayedBytes  int
+	RedactedBlocks int
 }
 
 func invalid(path, message string) error {
@@ -191,6 +208,10 @@ func textParts(v any, path string, allowedTypes ...string) (any, error) {
 // passthrough 零改动，hoist 抽出图片并在工具批次后插入 user 图片消息（改写标记
 // 写入 Request.Mutated，供 encodedRequest 决定是否重新序列化），reject 明确 400。
 func Decode(kind Kind, raw []byte) (*Request, error) {
+	return DecodeWithOptions(kind, raw, DecodeOptions{})
+}
+
+func DecodeWithOptions(kind Kind, raw []byte, opts DecodeOptions) (*Request, error) {
 	if kind == Chat {
 		chat, err := forwarding.Parse(raw)
 		if err != nil {
@@ -209,12 +230,14 @@ func Decode(kind Kind, raw []byte) (*Request, error) {
 	var dst map[string]any
 	var tools *toolIndex
 	var dropped []string
+	var thinking ThinkingReplayStats
 	switch kind {
 	case Responses:
 		tools = newToolIndex()
 		dst, err = responsesRequest(src, tools, &dropped)
 	case Anthropic:
-		dst, err = anthropicRequest(src, &dropped)
+		thinking.Enabled = opts.ReplayThinking
+		dst, err = anthropicRequest(src, &dropped, &thinking)
 	default:
 		return nil, invalid("protocol", "unsupported protocol")
 	}
@@ -238,7 +261,7 @@ func Decode(kind Kind, raw []byte) (*Request, error) {
 	if err != nil {
 		return nil, mediaError(err)
 	}
-	return &Request{Kind: kind, Chat: chat, Source: src, Mutated: mutated, tools: tools, Dropped: dropped}, nil
+	return &Request{Kind: kind, Chat: chat, Source: src, Mutated: mutated, tools: tools, Dropped: dropped, Thinking: thinking}, nil
 }
 
 func function(name, description, schema any, path string) (map[string]any, error) {

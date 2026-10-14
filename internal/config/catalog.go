@@ -182,6 +182,7 @@ var entries = Catalog{
 	{Path: "upstream.device_token_file", Mode: Hot, Group: "upstream", Why: ""},
 	{Path: "upstream.passthrough_ip", Mode: Hot, Group: "upstream", Why: ""},
 	{Path: "upstream.derive_conversation_id", Mode: Hot, Group: "upstream", Why: ""},
+	{Path: "upstream.replay_thinking", Mode: Hot, Group: "upstream", Why: ""},
 	{Path: "upstream.chat_base_cn", Mode: Hot, Group: "upstream", Why: ""},
 	{Path: "upstream.timeout_seconds", Mode: Hot, Group: "upstream", Why: ""},
 	{Path: "upstream.header_timeout_seconds", Mode: Hot, Group: "upstream", Why: ""},

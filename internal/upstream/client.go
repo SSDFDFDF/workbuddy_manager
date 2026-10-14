@@ -45,7 +45,7 @@ const (
 	ErrWafBlock                      // 403 + 非业务信封体（APISIX WAF 拦截页/空体）→ 账号软冷却 + 抖动退避
 	ErrPromptTooLong                 // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
 	ErrImageInvalid                  // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
-	ErrModelQueued                   // 6020/6021/6022 或 HTTP 202「模型容量队列」→ 可重试语义：不罚号、不轮转，末端 429 + Retry-After 透传原文
+	ErrModelQueued                   // capacity queue: retryable, no account penalty/rotation; safe diagnostics + Retry-After
 	ErrClient                        // 其他 4xx / 业务错误
 )
 
@@ -1269,6 +1269,9 @@ func (c *Client) ChatStreamInput(ctx context.Context, a *auth.Auth, in ChatInput
 			if d, ok := ParseRetryAfter(resp.Header); ok {
 				ue.RetryAfter = d
 			}
+			if kind == ErrModelQueued {
+				ue.RetryAfter = queueDelay(string(raw), ue.RetryAfter)
+			}
 			return nil, resp.StatusCode, raw, ue
 		}
 		if resp.StatusCode == http.StatusAccepted {
@@ -1277,22 +1280,19 @@ func (c *Client) ChatStreamInput(ctx context.Context, a *auth.Auth, in ChatInput
 			// 看不到排队语义与等待时长，运维也无法区分「上游在排队」与「上游故障」。
 			// 现按队列语义返回：429 + Retry-After（data.retry_after 或响应头），
 			// body 原文一并带回供透传；账号零惩罚（排队与账号健康无关）。
-			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+			raw, rerr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 			resp.Body.Close()
 			cancel()
+			if rerr != nil {
+				return nil, 0, nil, fmt.Errorf("read queued body: %w", rerr)
+			}
 			ue := &Error{Kind: ErrModelQueued, Status: http.StatusTooManyRequests,
 				Msg: truncate(string(raw), 200)}
 			if ue.Msg == "" {
 				ue.Msg = "upstream accepted the chat request without serving it (202 model capacity queue)"
 			}
-			if info, ok := ParseQueueInfo(string(raw)); ok {
-				ue.RetryAfter = info.RetryAfter
-			}
-			if ue.RetryAfter <= 0 {
-				if d, ok := ParseRetryAfter(resp.Header); ok {
-					ue.RetryAfter = d
-				}
-			}
+			delay, _ := ParseRetryAfter(resp.Header)
+			ue.RetryAfter = queueDelay(string(raw), delay)
 			log.Printf("WARN: [upstream] chat_stream acct=%s: upstream 202 queued kind=%s retryAfter=%s body=%s",
 				logfmt.Label(a.UID, a.NicknameValue()), ue.Kind, ue.RetryAfter, truncate(string(raw), 200))
 			return nil, http.StatusTooManyRequests, raw, ue
@@ -1300,7 +1300,8 @@ func (c *Client) ChatStreamInput(ctx context.Context, a *auth.Auth, in ChatInput
 		// 成功分支：cancel 所有权交给 monitorBody（其 Close 会 cancel）；
 		// IdleTimeout<=0 时 monitorBody 原样返回底流、无人调 cancel——可接受：
 		// 取消传播由 http.Transport 在 body Close / 父 ctx 取消时处理，连接正常清理。
-		return monitorBody(resp.Body, c.optsNow().IdleTimeout, cancel), resp.StatusCode, nil, nil
+		delay, _ := ParseRetryAfter(resp.Header)
+		return &queueResponseBody{ReadCloser: monitorBody(resp.Body, c.optsNow().IdleTimeout, cancel), retryAfter: delay}, resp.StatusCode, nil, nil
 	}
 	panic("unreachable: chatPaths is never empty") // for range 空集时编译器仍要求兜底 return；chatPaths 恒非空（构造保证），永不触达
 }

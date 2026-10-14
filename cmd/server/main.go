@@ -809,6 +809,7 @@ func upstreamOptions(cfg *config.Config) upstream.Options {
 		DeviceTokenFile:      cfg.Upstream.DeviceTokenFile,
 		PassthroughIP:        cfg.Upstream.PassthroughIP,
 		DeriveConversationID: cfg.Upstream.DeriveConversationID,
+		ReplayThinking:       cfg.Upstream.ReplayThinking,
 		ChatBaseCN:           cfg.Upstream.ChatBaseCN,
 		ChatBaseGlobal:       cfg.Global.ChatBase,
 		BillingBaseGlobal:    cfg.Global.BillingBase,
