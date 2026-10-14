@@ -1219,7 +1219,18 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 				if uerr.RetryAfter > 0 {
 					w.Header().Set("Retry-After", fmt.Sprint(int(uerr.RetryAfter.Seconds())+1))
 				}
-				out.JSON(w, st.status, upstream.ErrorResponse(kind, string(respBody)))
+				errBody := upstream.ErrorResponse(kind, string(respBody))
+				// 队列的 gateway_hint 带可行动的量化信息（队伍位置/容量/等待时长）——
+				// 客户端据此决定“等多久”还是“换模型”，是排队语义不可缺的一半；
+				// 其余分类保持既有形状不变（它们的 hint 仍只在流式 error 帧上附加）。
+				if kind == upstream.ErrModelQueued {
+					if hint := upstream.GatewayHint(kind, string(respBody), h.hintContext(bareModel, reqHasImage)); hint != "" {
+						if em, ok := errBody["error"].(map[string]any); ok {
+							em["gateway_hint"] = hint
+						}
+					}
+				}
+				out.JSON(w, st.status, errBody)
 				return
 			}
 			// 仅 ErrModelBlocked（11102「该后端无此模型」）继续换号：它可能是账号维度的，
