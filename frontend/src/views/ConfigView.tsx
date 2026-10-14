@@ -6,7 +6,7 @@ import { useData } from '../data';
 import type { CatalogField, PromptPresetInfo, PromptPreviewResponse, VersionInfo, BuiltinScrubRule, BuiltinScrubResponse } from '../types';
 import {
   CFG_MAP, DURATION_FIELDS, DURATION_RE, DURATION_TIP,
-  dig, collectConfig, formatRules,
+  dig, collectConfig, formatRules, formatEffortOverrides, parseEffortOverrides,
 } from '../configSchema';
 import { Field, Switch, type FieldSpec } from './configWidgets';
 import { btnPrimary, btnGhost, btnXsPrimary } from '../components/buttons';
@@ -18,6 +18,7 @@ const SECTIONS = [
   { id: 'sec-tasks', name: '定时任务', sub: '签到 · 保活 · 旅行 · 余额' },
   { id: 'sec-pool', name: '账号池与治理', sub: '并发 · 熔断 · 降权 · 权重' },
   { id: 'sec-upstream', name: '客户端仿真', sub: 'UA · CLI版本 · 域名映射' },
+  { id: 'sec-effort', name: '模型档位', sub: '默认思考档 · 本地覆盖' },
   { id: 'sec-prompt', name: '网关提示词', sub: '组合模式 · 预设 · 覆盖' },
   { id: 'sec-media', name: '多模态与图片', sub: '工具图片 · 转码 · 压缩' },
   { id: 'sec-fp-log', name: '指纹与日志', sub: '指纹脱敏 · 规则 · 来源记录' },
@@ -228,6 +229,7 @@ export function ConfigView() {
       v['fingerprint_rules_text'] = formatRules(cfg.fingerprint_rules);
       v['fingerprint_disabled_json'] = JSON.stringify(cfg.fingerprint_disabled || []);
       v['fingerprint_overrides_json'] = JSON.stringify(cfg.fingerprint_overrides || {});
+      v['effort_overrides_text'] = formatEffortOverrides(cfg.upstream?.effort_default_overrides);
       setValues(v);
       const gt = cfg.growth?.autotasks?.tasks;
       setGrowthTasks(gt && Object.keys(gt).length ? JSON.stringify(gt, null, 2) : '');
@@ -325,6 +327,13 @@ export function ConfigView() {
         toast(DURATION_TIP, 'err');
         return;
       }
+    }
+    /* 默认思考档覆盖的语法校验：行内必须有 `键 = 值`（缺等号/键或值为空的行会被
+       丢弃，静默丢弃等于"我配了但没生效"，所以在这里拦下来）。 */
+    const effBad = parseEffortOverrides(String(values['effort_overrides_text'] ?? '')).bad;
+    if (effBad.length) {
+      toast('默认思考档覆盖格式有误（应为 model = 档位）：' + effBad[0], 'err');
+      return;
     }
     setSaving(true);
     try {
@@ -681,6 +690,53 @@ export function ConfigView() {
                 hint: '显式前缀恒优先；改动即时生效',
               })}
             </Grid>
+          </div>
+        )}
+
+        {sec === 'sec-effort' && (
+          <div className="flex flex-col gap-4 rounded-xl border border-[var(--line)] bg-[var(--surface)] p-4">
+            <h3 className="text-[14px] font-semibold">
+              模型思考档位 <span className="ml-1 text-[12px] font-normal text-[var(--ink-3)]">默认档的本地覆盖 · 改完即时生效</span>
+            </h3>
+            <SubHead>默认思考档覆盖（upstream.effort_default_overrides）</SubHead>
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-[11.5px] text-[var(--ink-3)]">
+              <span><code>model = 档位</code> 该模型在两个域都用这个默认档</span>
+              <span><code>cn:model = 档位</code> / <code>global:model = 档位</code> 只该域生效</span>
+              <span><code>* = 档位</code> / <code>cn:* = 档位</code> 通配（只作用于档位能力已知的模型）</span>
+              <span><code># …</code> 注释</span>
+            </div>
+            <Field
+              spec={{
+                name: 'effort_overrides_text',
+                label: '覆盖清单',
+                type: 'textarea',
+                rows: 5,
+                placeholder: 'glm-5.3-flash = low\ncn:deepseek-v4.1-flash = high\nglobal:deepseek-v4.1-flash = high',
+                hint:
+                  '档位取值：minimal / low / medium / high / xhigh / max（off/none 是「关闭思考」的开关值，不能当默认档）。' +
+                  '命中即压过上游下发的 defaultEffort：/v1/models 宣告的默认档、客户端未指定档位时的出站注入、越界档位的回退目标三处同时生效；' +
+                  '清空 = 完全沿用上游。取值超出该模型支持集时按「不超过它的最高支持档」落地，不会把越界值发出去。',
+              }}
+              value={values['effort_overrides_text'] ?? ''}
+              onChange={set('effort_overrides_text')}
+              bad={parseEffortOverrides(String(values['effort_overrides_text'] ?? '')).bad.length > 0}
+            />
+            {(() => {
+              const parsed = parseEffortOverrides(String(values['effort_overrides_text'] ?? ''));
+              const lines = Object.keys(parsed.entries).length;
+              const bits: string[] = [`已配置 ${lines} 条`];
+              if (parsed.bad.length) bits.push(`${parsed.bad.length} 行未识别（保存会被拦下）`);
+              return (
+                <div className="text-[11.5px] leading-relaxed text-[var(--ink-3)]">
+                  {bits.join(' · ')}
+                  {lines ? '：' + Object.entries(parsed.entries).map(([k, v]) => `${k} → ${v}`).join('、') : '（当前完全沿用上游默认档）'}
+                </div>
+              );
+            })()}
+            <div className="text-[11.5px] leading-relaxed text-[var(--ink-3)]">
+              同一模型名在 CN 与国际版的合法档位可以不同（例：deepseek-v4.1-flash 国际版只认 high），所以跨域不同的模型请用带域前缀的写法。
+              模型与档位清单可在「模型能力」页查看；本地覆盖值会直接出现在该页的「默认档」列。
+            </div>
           </div>
         )}
 

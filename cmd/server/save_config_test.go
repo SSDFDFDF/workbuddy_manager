@@ -567,3 +567,91 @@ func TestSaveConfigFingerprintRoundTrip(t *testing.T) {
 		t.Fatal("关闭后层应停用")
 	}
 }
+
+// TestSaveConfigEffortOverridesRoundTrip 面板「模型档位」页的完整保存链路：
+// 落盘归一化 + 热生效（进程级快照）+ **删键/清空真的生效**。
+//
+// 最后一点是本用例的重点：map 字段在 encoding/json 里是逐键合并语义，
+// 若保存路径不先清基准，「删掉一行 / 清空清单」会写回旧值（静默 no-op），
+// 而面板显示的是「已保存」——用户会以为改回去了、实际还在生效。
+func TestSaveConfigEffortOverridesRoundTrip(t *testing.T) {
+	upstream.ResetLookupChainForTest()
+	t.Cleanup(upstream.ResetLookupChainForTest)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	start := `{"listen":":1","upstream":{"effort_default_overrides":{"glm-5.3-flash":"low","kimi-k2.6":"medium"}}}`
+	if err := os.WriteFile(path, []byte(start), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ht := testHotTargets()
+
+	// 面板整表下发：改一条、删一条（kimi-k2.6 从提交里消失 = 用户删掉了那一行）。
+	// 取值取 max：既能与磁盘现值 low 区分，也能与静态兜底默认档 high 区分。
+	payload := []byte(`{"listen":":1","upstream":{"effort_default_overrides":{"GLM-5.3-flash":"max"}}}`)
+	if _, err := saveConfig(payload, path, ht); err != nil {
+		t.Fatalf("saveConfig: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := config.ParseConfig(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parsed.Upstream.EffortDefaultOverrides; len(got) != 1 || got["glm-5.3-flash"] != "max" {
+		t.Fatalf("整表替换未生效（删键/改值应该是替换而不是合并）: %v", got)
+	}
+	// 热生效：进程级快照已换（无需重启）。
+	if _, def := (&upstream.Client{}).EffortSupport("cn", "glm-5.3-flash"); def != "max" {
+		t.Fatalf("覆盖未热应用到查找链: %q", def)
+	}
+	if _, ok := upstream.EffortDefaultOverride("cn", "kimi-k2.6", true); ok {
+		t.Fatal("被删掉的条目仍在生效（热应用的是旧表？）")
+	}
+
+	// 同次提交归一后重名：明确拒绝，既不落盘也不替换热快照。
+	if _, err := saveConfig([]byte(`{"upstream":{"effort_default_overrides":{"glm-5.3-flash":"low"," GLM-5.3-flash ":"high"}}}`), path, ht); err == nil {
+		t.Fatal("归一后重名的覆盖表必须拒绝")
+	}
+	afterRejected, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(afterRejected) != string(raw) {
+		t.Fatal("被拒绝的提交改写了配置文件")
+	}
+	if _, def := (&upstream.Client{}).EffortSupport("cn", "glm-5.3-flash"); def != "max" {
+		t.Fatalf("被拒绝的提交改变了热快照: %q", def)
+	}
+
+	// 清空整张表（面板清空文本域）→ 落盘不留空壳 map，行为完全沿用上游。
+	if _, err := saveConfig([]byte(`{"listen":":1","upstream":{"effort_default_overrides":{}}}`), path, ht); err != nil {
+		t.Fatalf("saveConfig(clear): %v", err)
+	}
+	raw, _ = os.ReadFile(path)
+	if strings.Contains(string(raw), "effort_default_overrides") {
+		t.Fatalf("清空后不该留下空壳 map:\n%s", raw)
+	}
+	// 清空后回到上游/静态口径（glm-5.3-flash 的 CN 静态默认档是 high）。
+	if _, def := (&upstream.Client{}).EffortSupport("cn", "glm-5.3-flash"); def != "high" {
+		t.Fatalf("清空后应回落静态默认档 high，实际 %q", def)
+	}
+
+	// 不提交该键 → 磁盘现值原样保留（部分提交语义不受本次改动影响）。
+	if err := os.WriteFile(path, []byte(start), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := saveConfig([]byte(`{"listen":":2"}`), path, ht); err != nil {
+		t.Fatalf("saveConfig(untouched): %v", err)
+	}
+	raw, _ = os.ReadFile(path)
+	parsed, err = config.ParseConfig(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := parsed.Upstream.EffortDefaultOverrides; len(got) != 2 {
+		t.Fatalf("未提交该键时磁盘现值必须保留: %v", got)
+	}
+}

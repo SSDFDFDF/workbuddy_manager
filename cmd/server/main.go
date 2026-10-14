@@ -194,6 +194,9 @@ func main() {
 	// 数据目录与 state.json 同风格（Docker volume 持久化路径）。首次缺失/损坏自动
 	// 回落仓库内嵌种子；models.dev 按需拉取成功后原子写回。
 	upstream.SetModelCatalogPath(stateSibling(cfg.StateFile, "model.json"))
+	// 模型默认思考档的本地覆盖接线（upstream.effort_default_overrides）：进程级快照，
+	// 空表 = 完全沿用上游；保存配置时同函数热应用（见 saveConfigTx）。
+	upstream.SetEffortDefaultOverrides(cfg.Upstream.EffortDefaultOverrides)
 
 	sch := scheduler.New(scheduler.Config{
 		Pool:           p,
@@ -730,6 +733,10 @@ func saveConfigTx(raw []byte, path string, hot *hotTargets) ([]string, error) {
 		return nil, err
 	}
 	up.Fingerprints.Store(newScrub)
+	// 模型默认思考档的本地覆盖热生效（upstream.effort_default_overrides）：进程级快照
+	// 整体替换（同 fingerprint 层的写法），下一次 /v1/models 与下一个请求即用新表。
+	// 不判 upstream 是否为 nil：快照是包级单例，装配前后都要与配置一致。
+	upstream.SetEffortDefaultOverrides(newCfg.Upstream.EffortDefaultOverrides)
 	// 工具结果图片策略热生效：进程级原子快照，无需重启（normalize 已校验取值）。
 	if err := media.SetToolPolicy(media.ToolPolicy(newCfg.Media.ToolImages)); err != nil {
 		return nil, err

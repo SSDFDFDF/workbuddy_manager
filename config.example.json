@@ -102,7 +102,8 @@
     "client_name": "",
     "device_token": "",
     "device_token_file": "",
-    "passthrough_ip": false
+    "passthrough_ip": false,
+    "effort_default_overrides": {}
   },
   "prompt": {
     "mode": "inject",

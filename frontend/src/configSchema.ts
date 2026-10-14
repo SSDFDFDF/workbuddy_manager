@@ -157,6 +157,51 @@ export interface FpRule {
   action: string;
 }
 
+/* 默认思考档覆盖的文本编解码（一行一条：`model = 档位`）。
+
+   为什么用行文本而不是 JSON 输入框：这份表是「人手工维护的短清单」（几个模型），
+   行文本改一行不用动引号/逗号；键与值都在解析时就小写并去空白，与后端归一化同口径
+   （后端还会校验档位名形态、剔除关闭思考值并告警）。
+   无法识别的行（缺 `=` / 键或值为空 / 归一后重名）不静默丢掉：返回给调用方提示，
+   由界面拦保存（静默丢一行 = 用户以为配上了、实际没生效）。 */
+export interface EffortOverrideParse {
+  entries: Record<string, string>;
+  bad: string[];
+}
+
+export function parseEffortOverrides(text: string): EffortOverrideParse {
+  const entries: Record<string, string> = Object.create(null);
+  const bad: string[] = [];
+  for (const raw of String(text ?? '').split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const at = line.indexOf('=');
+    if (at < 0) {
+      bad.push(line);
+      continue;
+    }
+    const key = line.slice(0, at).trim().toLowerCase();
+    const val = line.slice(at + 1).trim().toLowerCase();
+    if (!key || !val) {
+      bad.push(line);
+      continue;
+    }
+    if (Object.prototype.hasOwnProperty.call(entries, key)) {
+      bad.push(line + '（模型键归一后重复）');
+      continue;
+    }
+    entries[key] = val;
+  }
+  return { entries, bad };
+}
+
+export function formatEffortOverrides(m: Record<string, string> | undefined | null): string {
+  return Object.entries(m || {})
+    .map(([k, v]) => k + ' = ' + v)
+    .sort()
+    .join('\n');
+}
+
 export function parseRules(text: string): FpRule[] {
   const out: FpRule[] = [];
   for (const raw of String(text ?? '').split(/\r?\n/)) {
@@ -239,5 +284,11 @@ export function collectConfig(
       if (typeof o === 'object' && o) out.fingerprint_overrides = o;
     } catch {}
   }
+
+  /* 默认思考档覆盖：行文本 → upstream.effort_default_overrides。
+     空文本也照发空 map（清空表单 = 清掉该键 = 回落完全沿用上游）；不发的话磁盘上
+     的旧条目永远不会消失（提交里没出现的键保持磁盘现值）。 */
+  const effEl = form['effort_overrides_text'];
+  if (effEl) put(out, ['upstream', 'effort_default_overrides'], parseEffortOverrides(String(effEl.value ?? '')).entries);
   return out;
 }

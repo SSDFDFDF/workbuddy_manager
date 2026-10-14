@@ -853,6 +853,9 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 	// 出站基线：模型名统一由 upstream 从文档设置（realm 前缀由 bareModel 剥除），
 	// 不再对字节做一次 rewriteModel 往返（旧实现：解析 + 重新序列化）。
 	baseObj := peek.Object
+	// Responses 回显的基线必须保持原样：失败 attempt 注入/钳位的档位不能带到
+	// 下一个域。每次出站前仅复制 reasoning 子树，不复制整个入参/消息历史。
+	baseReasoning, hasBaseReasoning := request.Source["reasoning"]
 
 	// 会话头族（issue #35）：后台按 X-Conversation-Request-ID（对话轮级）聚合请求，
 	// 官方客户端一次 user send 内所有 tool call/重试/换号复用同一个 ID。此处**轮转
@@ -980,13 +983,21 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 		attempt := *peek
 		attempt.Object = attemptObj
 		attempt.Model = bareModel
+		if kind == protocol.Responses {
+			if hasBaseReasoning {
+				request.Source["reasoning"] = jsondoc.Copy(baseReasoning)
+			} else {
+				delete(request.Source, "reasoning")
+			}
+		}
 
 		// 档位归一（reasoning effort 钳位）：放在**按实际选中账号所属域**的位置，
 		// 因为同一模型名在 CN 与 global 的合法档位可以不同（deepseek-v4.1-flash：
 		// CN [low high max] / global [high]），笼统钳在解析层会拿错域的集合。
 		// 上游对越界档位回 400 code=11133（账号与 body 无关，换号无用），所以只能在
-		// 发送前归一到≤请求档位的最高支持档；没有归一依据（未知模型/未知档位）
-		// 一律透传，交给上游裁决。
+		// 发送前归一：回退目标是本地默认档覆盖（upstream.effort_default_overrides，
+		// 见 effort_override.go），未配置该模型时维持既有「≤请求档位的最高支持档」；
+		// 没有归一依据（未知模型/未知档位）一律透传，交给上游裁决。
 		//
 		// 与提示词组合同样在所有 attempt 共享的 baseObj 上做写时拷贝：改写后的文档
 		// 与入站字节不再同源，哨兵预检必须失效（attemptRaw=nil）。
@@ -1007,6 +1018,30 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 			// 实际发出的域为准。
 			if m, ok := request.Source["reasoning"].(map[string]any); ok {
 				m["effort"] = to
+			}
+		}
+		// 本地默认思考档注入（upstream.effort_default_overrides）：客户端一个档位都
+		// 没带、也没显式关思考时，补上本地配置的默认档（空表/未命中 = 零行为变化，
+		// 与上游默认行为逐字一致）。这是**显式可见**的近似变换：写入归档 rewritten
+		// 列（面板与搜索都看得到），Responses 桥回显实际生效档。
+		//
+		// 归一在前、注入在后，两者互斥（上面只在「客户端表态且值需改写」时触发；
+		// 这里只在客户端未表态时触发），不可能同时对同一字段写两次。
+		if effortKey, to := h.cfg.Upstream.RequestEffortDefault(attemptObj, acct.Realm(), bareModel); to != "" {
+			if !attemptCopied {
+				attemptObj = jsondoc.CopyObject(baseObj)
+				attempt.Object = attemptObj
+				attemptCopied = true
+			}
+			upstream.SetRequestEffort(attemptObj, effortKey, to)
+			attemptRaw = nil // 文档与入站字节不同源，哨兵预检必须失效（同归一分支）
+			st.noteRewrite("reasoning.effort:默认→" + to)
+			if m, ok := request.Source["reasoning"].(map[string]any); ok {
+				m["effort"] = to
+			} else if kind == protocol.Responses {
+				// 入参本无 reasoning：仅 Responses 桥回显生效档（其余协议不回显请求参数，
+				// 凭空加键会改变桥自身的入参快照语义）。
+				request.Source["reasoning"] = map[string]any{"effort": to}
 			}
 		}
 		// 客户端 IP 按请求传递（PassthroughIP 开启时注入；消除共享字段竞态）。

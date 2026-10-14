@@ -43,10 +43,14 @@ func captureHandler(t *testing.T, cfg Config, cap *outboundCapture) *Handler {
 	// 把调用方准备好的指纹层搬到这个 fake client 上。注意不能直接赋值 Holder
 	// （内含 atomic.Pointer，不可拷贝），且**必须**搬——否则用例测的是一条没有
 	// 指纹层的路径，断言语义会被静默架空。
+	// global realm 开关同理（globalOn 读的是 client 侧快照，不是 handler 字段）：
+	// 调用方在 cfg.Upstream 上声明的域开关必须跟着一起搬，否则 global 用例会被
+	// 「global realm disabled」提前 400，测到的是一条死路。
 	if cfg.Upstream != nil {
 		if l := cfg.Upstream.Fingerprints.Load(); l != nil {
 			base.Fingerprints.Store(l)
 		}
+		base.GlobalEnabled = cfg.Upstream.GlobalEnabled
 	}
 	cfg.Upstream = base
 	return NewHandler(cfg)

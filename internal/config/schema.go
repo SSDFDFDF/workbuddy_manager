@@ -270,6 +270,26 @@ type Config struct {
 		DeviceTokenFile string `json:"device_token_file"`
 		// PassthroughIP 是否透传客户端 IP 给上游（默认 false，反代安全边界）。
 		PassthroughIP bool `json:"passthrough_ip"`
+		// EffortDefaultOverrides 模型「默认思考档」的本地覆盖（键 = 模型名，值 = 档位名）。
+		//
+		// 为什么需要：模型目录里的 reasoning.defaultEffort（远端探测）与静态兜底表的
+		// 默认档都是上游/编译期口径，用户改不了——而默认档正是客户端不指定档位时
+		// 实际执行的档位。本表命中即压过两者（**本地的覆盖上游配置**），空表 = 完全
+		// 沿用上游（默认，零行为变化）。
+		//
+		// 键："model"（两域生效）/ "cn:model"、"global:model"（只该域）/ "*"、
+		// "cn:*"、"global:*"（通配，只作用于档位能力已知的模型）。
+		// 值：minimal/low/medium/high/xhigh/max；off/none 是关闭思考的开关值而不是档位，
+		// 配置侧拒绝（不允许静默打开/关掉思考）。
+		//
+		// 生效面三处：/v1/models 与面板宣告的默认档、客户端未带档位时的出站注入、
+		// 越界档位的回退目标。详见 internal/upstream/effort_override.go。
+		// 热生效（进程级快照整体替换，无需重启）。
+		//
+		// 整表替换：提交里出现该键 = 整张表被它替换（删键/清空同样生效，与 slice
+		// 字段同语义）；不提交该键则保持磁盘现值。配置解析层统一处理整表替换
+		// （见 load.go 的 decodeInto）；同次提交中归一后重名的键直接拒绝。
+		EffortDefaultOverrides map[string]string `json:"effort_default_overrides,omitempty"`
 	} `json:"upstream"`
 
 	Prompt struct {

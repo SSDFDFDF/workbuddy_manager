@@ -11,6 +11,8 @@ package config
 
 import (
 	"fmt"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +20,7 @@ import (
 	"workbuddy_manager/internal/media"
 	"workbuddy_manager/internal/proxy"
 	"workbuddy_manager/internal/scrub"
+	"workbuddy_manager/internal/upstream"
 )
 
 func (c *Config) normalize() error {
@@ -213,6 +216,10 @@ func (c *Config) normalize() error {
 	}
 	c.ProxyClient = pc
 	if err := c.normalizeFingerprintRules(); err != nil {
+		return err
+	}
+	// 模型默认思考档的本地覆盖（upstream.effort_default_overrides）：归一化 + 校验。
+	if err := c.normalizeEffortDefaultOverrides(); err != nil {
 		return err
 	}
 	// 工具结果图片策略：空 = auto（按入口默认）。这里只校验；生效由 main 的热应用
@@ -519,5 +526,79 @@ func (c *Config) normalizeFingerprintRules() error {
 	}
 
 	// 4. 自定义规则校验已完成（scrub.Build 试编译），层构建由 cmd/server 装配。
+	return nil
+}
+
+// effortOverrideRe 档位名的形态校验：上游可能新增档位名，但形态是稳定的标识符式。
+// 形态非法 fail fast（拼错了要立刻知道），形态合法但不在已知档位表里只告警
+// （档位名集合由上游定义，本仓不把它变成封闭枚举——告警可被其余路径发现）。
+var effortOverrideRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,31}$`)
+
+// normalizeEffortDefaultOverrides 归一化 upstream.effort_default_overrides（模型默认
+// 思考档的本地覆盖，见 internal/upstream/effort_override.go）。
+//
+// 键："model" / "cn:model" / "global:model" / "*" / "cn:*" / "global:*"
+// （大小写与首尾空白不敏感；未知域前缀告警剔除——模型名里不该有冒号）；
+// 值：真实档位名。空值 = 不覆盖（面板清空某行的语义）。
+//
+// 与 fingerprint_disabled/overrides 同风格：影响局部行为的条目告警剔除（不阻断启动），
+// 只有形态非法或归一后重名才 fail fast（不按 map 随机迭代顺序挑一个值）。
+func (c *Config) normalizeEffortDefaultOverrides() error {
+	in := c.Upstream.EffortDefaultOverrides
+	if len(in) == 0 {
+		c.Upstream.EffortDefaultOverrides = nil
+		return nil
+	}
+	cleaned := make(map[string]string, len(in))
+	keys := make([]string, 0, len(in))
+	for key := range in {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys) // 错误与告警稳定排序；重名显式拒绝，绝不靠遍历顺序决定取值。
+	seen := make(map[string]string, len(in))
+	for _, rawKey := range keys {
+		rawVal := in[rawKey]
+		key := strings.ToLower(strings.TrimSpace(rawKey))
+		if key == "" {
+			continue
+		}
+		if previous, exists := seen[key]; exists {
+			return fmt.Errorf("upstream.effort_default_overrides: 键 %q 与 %q 归一后重复（%q）", previous, rawKey, key)
+		}
+		seen[key] = rawKey
+		if key != "*" {
+			if realm, model, ok := strings.Cut(key, ":"); ok {
+				if realm != "cn" && realm != "global" {
+					c.addWarning("upstream.effort_default_overrides[" + rawKey + "]: 未知域前缀 " + realm + "（已忽略，只认 cn/global；模型名里不应有冒号）")
+					continue
+				}
+				if model == "" {
+					c.addWarning("upstream.effort_default_overrides[" + rawKey + "]: 只有域前缀没有模型名（已忽略）")
+					continue
+				}
+			}
+		}
+		val := strings.ToLower(strings.TrimSpace(rawVal))
+		if val == "" {
+			continue // 空值 = 不覆盖
+		}
+		if !effortOverrideRe.MatchString(val) {
+			return fmt.Errorf("upstream.effort_default_overrides[%s]: %q 不是合法档位名（形如 low/medium/high/xhigh/max）", rawKey, rawVal)
+		}
+		if upstream.IsOffEffortSwitch(val) {
+			c.addWarning("upstream.effort_default_overrides[" + rawKey + "]: " + val + " 是关闭思考的开关值而不是档位（已忽略）")
+			continue
+		}
+		if !upstream.IsKnownEffortTier(val) {
+			c.addWarning("upstream.effort_default_overrides[" + rawKey + "]: " + val + " 不在已知档位表内（保留，最终由上游裁决）")
+		}
+		cleaned[key] = val
+	}
+	// 响应对齐 fingerprint_overrides：清空后回落 nil（而不是空 map），
+	// 保证「保存过又清空」不改变落盘文件形状。
+	if len(cleaned) == 0 {
+		cleaned = nil
+	}
+	c.Upstream.EffortDefaultOverrides = cleaned
 	return nil
 }

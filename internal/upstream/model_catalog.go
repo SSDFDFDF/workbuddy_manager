@@ -220,13 +220,14 @@ func loadModelCatalogAt(path string) {
 	catalogState.initLocked()
 }
 
-// ResetLookupChainForTest 跨包测试钩子：清空 model.json 缓存与 models.dev fetcher
-// 的全部包级单例状态（含在途拉取冷却——防 server 包测试末尾的异步 goroutine 打
-// 真网、防跨测试缓存污染）。仅测试引用（upstream 包内用 resetModelsDev /
-// resetModelCatalog 等价内联）。
+// ResetLookupChainForTest 跨包测试钩子：清空 model.json 缓存、models.dev fetcher
+// 与本地默认思考档覆盖表的全部包级单例状态（含在途拉取冷却——防 server 包测试末尾的
+// 异步 goroutine 打真网、防跨测试缓存污染）。仅测试引用（upstream 包内用
+// resetModelsDev / resetModelCatalog / resetEffortDefaultOverrides 等价内联）。
 func ResetLookupChainForTest() {
 	resetModelCatalog()
 	resetModelsDev()
+	resetEffortDefaultOverrides()
 }
 
 // ---- 四级查找链（对 handler 暴露的入口，签名与 32a3c13 三级版兼容）----

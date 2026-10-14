@@ -170,6 +170,13 @@ func decodeInto(obj map[string]any, c *Config) error {
 	if err != nil {
 		return fmt.Errorf("parse config: %w", err)
 	}
+	// 默认档覆盖表是整表替换，不使用 encoding/json 对非 nil map 的逐键合并。
+	// 放在配置解析层，文件加载、脚本提交和面板保存共用同一语义；未提交则保留。
+	if up, ok := obj["upstream"].(map[string]any); ok {
+		if _, submitted := up["effort_default_overrides"]; submitted {
+			c.Upstream.EffortDefaultOverrides = nil
+		}
+	}
 	if err := json.Unmarshal(b, c); err != nil {
 		return fmt.Errorf("parse config: %w", err)
 	}
@@ -187,6 +194,8 @@ func ParseConfig(raw []byte) (*Config, error) {
 // ParseConfigInto 把 JSON 覆盖到 c 上并 normalize（不读文件、不读 env）。
 //
 // c 里已设置的值不会被未提交的键重置：这是保存路径“部分更新”的基础。
+// upstream.effort_default_overrides 显式提交时整表替换（{} / null 均清空）；
+// 其余 map 字段仍按子键合并。
 func ParseConfigInto(raw []byte, c *Config) (*Config, error) {
 	obj, err := jsondoc.Object(raw)
 	if err != nil {

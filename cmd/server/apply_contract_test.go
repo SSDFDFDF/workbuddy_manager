@@ -69,6 +69,8 @@ var hotAppliedPaths = []string{
 	"upstream.first_model_event_seconds",
 	"upstream.first_generation_seconds",
 	"upstream.tail_seconds",
+	// 模型默认思考档本地覆盖（upstream.SetEffortDefaultOverrides：原子快照整体替换）
+	"upstream.effort_default_overrides.*",
 	// 出站代理（proxy.Dynamic 指针整体替换）
 	"proxy_url",
 	"resin_url",

@@ -188,6 +188,9 @@ var entries = Catalog{
 	{Path: "upstream.first_model_event_seconds", Mode: Hot, Group: "upstream", Why: ""},
 	{Path: "upstream.first_generation_seconds", Mode: Hot, Group: "upstream", Why: ""},
 	{Path: "upstream.tail_seconds", Mode: Hot, Group: "upstream", Why: ""},
+	// 模型默认思考档本地覆盖：进程级快照整体替换（SetEffortDefaultOverrides），
+	// 下一次 /v1/models 与下一个请求即用新表。
+	{Path: "upstream.effort_default_overrides.*", Mode: Hot, Group: "upstream", Why: ""},
 
 	// ── 会话粘性 ────────────────────────────────────────────────────────
 	{Path: "session_sticky.*", Mode: Hot, Group: "session", Why: ""},

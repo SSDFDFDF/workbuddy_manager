@@ -13,7 +13,7 @@
 
 | # | 能力 | 行为差异 | 默认 |
 | --- | --- | --- | --- |
-| 1 | **转发契约（严格、不改写）** | 出站只做校验与编码：未知字段与大整数完整保留，无法表达的输入直接 400（跨协议入口的提示/状态字段另有「接受即丢」，见第 15 条）；删除系统提示词清洗、内容拦截降级重试、思考自动补档、GPT `max_tokens` 抬升、工具历史重排。**例外**：越界 `reasoning_effort` 按实际选中账号所属域的模型档位能力归一（≤请求档位的最高支持档），改写进归档 `dropped` 列可见 | 生效（无开关） |
+| 1 | **转发契约（严格、不改写）** | 出站只做校验与编码：未知字段与大整数完整保留，无法表达的输入直接 400（跨协议入口的提示/状态字段另有「接受即丢」，见第 15 条）；删除系统提示词清洗、内容拦截降级重试、思考自动补档、GPT `max_tokens` 抬升、工具历史重排。**例外**：越界 `reasoning_effort` 按实际选中账号所属域的模型档位能力归一（回退目标可配，见第 18 条；未配置时取 ≤请求档位的最高支持档），改写进归档 `rewritten` 列可见 | 生效（无开关） |
 | 2 | **响应统一管线** | 流式与非流式共用同一 SSE 解析与完成判定；HTTP 错误与 `error` 帧同一分类；按 choice index 独立聚合；错误帧/截断不再伪装成功；新增首模型事件/首生成/尾部阶段超时 | 生效 |
 | 3 | **重试与账号策略** | 仅「明确未受理」才换号；已生成/已提交一律不重放；限流与配额不跨账号绕过 | 生效 |
 | 4 | **系统提示词体系** | 组合位置 `none`/`replace`/`after`/`append`/`inject` + 六种内置预设（`official-*` 为官方渲染产物逐字，`default` 为自设计位）+ 按账号域覆盖 + 面板预览；预设是静态 MD 加载即用，无模板标记、无运行期变量改写；导出工具见 [scripts/render-official-presets.py](scripts/render-official-presets.py)，官方模板归档见 [docs/official-templates/README.md](docs/official-templates/README.md) | `none` |
@@ -30,6 +30,7 @@
 | 15 | **Responses / Anthropic 桥接** | `/v1/responses` 无状态文本 / function tools；`/v1/messages` 文本 / client tools。复用原有执行、重试、用量与日志；原生 Chat 保留扩展。纯提示/遥测字段、不支持的工具声明与客户端侧推理状态接受即丢（写入请求归档并在面板展示）；近似变换显式可见（`is_error` → `[tool error]` 前缀、`stop_sequences` → Chat `stop`）；会改变语义或伪造能力的字段（`previous_response_id` / `conversation` / `background:true` / `strict:true` / 白名单外未知字段）仍明确 400。见 [兼容说明](docs/PROTOCOL_COMPATIBILITY.md) | 生效（限定子集） |
 | 16 | **模型目录门禁（显式刷新制）** | 出站前先查模型目录快照：快照可用而模型不存在 → 直接 `404 model_not_found`，不选号、不打上游；命中时顺带重排候选域与纠正大小写。快照为空 → fail-open。快照只在启动预热与面板「模型能力」页手动刷新时写入；客户端请求路径零上游探测 | 生效 |
 | 17 | **原生工具调用标记还原（DSML→tool_calls）** | 上游（DeepSeek 系）在请求**未声明 tools** 时把工具调用吐成全角竖线原生标记文本落进 `content`；本层在响应出站前识别并还原成结构化 `tool_calls`。流式与非流式共用同一帧管线（`consume` 内展开）。判定分两级：名单非空走严格比对，名单为空（tools 丢失常态）走弱判定（块完美闭合 + 工具名形如标识符）。硬前提：本 choice 无结构化 tool_calls（真实调用一律优先让位）、块内不夹带正文；拿不准一律原文回吐，**绝不吞字节**。属 §15 式**显式可见近似变换**：命中写入归档 `rewritten` 列（面板展示）+ 日志一行，非静默改写 | 生效（限 Chat/Responses/Messages 出站路径） |
+| 18 | **模型默认思考档本地覆盖** | 模型「默认档」此前是上游/编译期口径、用户改不了；本项让配置压过它（**本地的覆盖上游配置**）：命中即改 `/v1/models` 与面板宣告的 `reasoning_default_effort`、客户端未带档位时的出站注入、越界档位的回退目标三处（同源一份表）；取值先落到该模型的支持集上（绝不宣告/发出必 400 的档位），越界值不会发出；off/none（关闭思考）拒绝作为默认档；改动进归档 `rewritten` 列 + 日志（非静默）。见 §6 | 未配置 = 完全沿用上游 |
 
 第 17 条的判定与边界（细节以 `internal/upstream/dsml.go` 文件头为准）：
 
@@ -109,6 +110,7 @@
 | 原生工具调用标记还原 | **新增** `internal/upstream/dsml.go`（还原内核 + `markupStream` 帧展开 + `WithMarkupRepair` / `ToolNameAllowlist*`）；`internal/upstream/sse.go`（`consume` 内按 `o.markup` 展开帧，流式/非流式/整包快照三路径共用）；`internal/server/handler.go`（名单提取 + 挂载还原器 + `noteRewrite` 观测）；归档复用 `reqlog.Event.rewritten` + 面板 `LogsView.tsx`（无前端改动，复用改写展示通道） |
 | 面板 | 源码 `frontend/src/`（React + Vite）；构建产物 `internal/panel/web/`（`go:embed`）；后端 `internal/panel/{config.go,panel.go,web_embed.go}` |
 | 成长任务自动化策略 | `internal/config/{schema,normalize,catalog}.go`、`internal/panel/autotask_policy.go`（**新增**）、`internal/panel/{autotask,taskcenter,tasks}.go`、`internal/upstream/blackcat.go`（`InWindow`）、`internal/scheduler/{scheduler.go,blackcat.go}`、`cmd/server/main.go`、面板表单项（`frontend/src/{configSchema.ts,views/ConfigView.tsx}`） |
+| 模型默认思考档覆盖 | **新增** `internal/upstream/effort_override.go`；`internal/upstream/{effort_catalog,model_catalog}.go`（EffortListing/ClampEffortWithDefault/RequestEffortDefault）、`internal/server/handler.go`（attempt 内的注入与回退目标 + 归档 `rewritten`）、`internal/config/{schema,normalize,catalog}.go`、`cmd/server/{main.go,apply_contract_test.go}`、面板表单项（`frontend/src/{configSchema.ts,views/ConfigView.tsx}`） |
 
 ---
 
@@ -142,6 +144,53 @@
 遍历通道：`messages[].content`（字符串与多模态 text 块）、`reasoning_content` / `reasoning`、
 `tool_calls[].function.arguments`，以及 `tools[].function.description` 与 `parameters.properties.*.description` / `.title`。
 image part 与工具名不改（改写会破坏数据或契约）。
+
+---
+
+## 6. 模型默认思考档覆盖（`upstream.effort_default_overrides`）
+
+上游模型目录下发 `reasoning.defaultEffort`，本仓还有一份产品级静态兜底默认档（`internal/upstream/effort_catalog.go`）——
+两者都是**上游/编译期**口径，用户改不了；而「默认档」正是客户端不指定档位（或指定了一个该模型不支持的档位）时
+实际执行的档位。本表是这份口径的唯一本地真相：**本地的覆盖上游配置**，空表 = 完全沿用上游（零行为变化）。
+
+| 配置键 | 语义 | 缺省 |
+| --- | --- | --- |
+| `upstream.effort_default_overrides` | 模型默认思考档覆盖表（键 = 模型名，值 = 档位名） | 空 = 沿用上游 |
+
+键位写法（大小写与首尾空白不敏感；未知域前缀告警并按配置剔除）：
+
+| 键 | 作用范围 |
+| --- | --- |
+| `model` | 两个域都生效 |
+| `cn:model` / `global:model` | 只该域生效（同一模型名在两个域的合法档位可以不同，见 §1 第 1 条） |
+| `*` / `cn:*` / `global:*` | 通配，只作用于**档位能力已知**的模型（不替上游编造能力） |
+
+取值：`minimal` / `low` / `medium` / `high` / `xhigh` / `max`。`off` / `none` 是「关闭思考」的开关值而不是档位，
+一律拒绝（本地默认档不允许静默打开或关掉思考）；形态非法的取值（含空白/非标识符）在启动/保存时 fail fast，
+形态合法但不在已知档位表内的值只告警（档位名集合由上游定义，本仓不把它变成封闭枚举）；
+上游支持集已声明的新档位同样可用于默认注入和越界回退，不要求存在于静态排序表。
+
+生效面（三处共用同一份表，保证「宣告的档位」与「可执行的档位」永不漂移）：
+
+1. **宣告**：`/v1/models` 与面板「模型能力」页的 `reasoning_default_effort`（客户端照宣告选档是硬前提）；
+2. **注入**：客户端三种档位别名都没带、也没用 `thinking.type=disabled` 显式关思考时，出站补上该默认档；
+3. **越界回退**：请求档位合法但该模型不支持时，回退目标是本地默认档（未配置时保持既有「≤请求档位的最高支持档」规则）。
+
+边界与不可协商项：
+
+- 覆盖值先落到该模型的支持集上（命中即按**声明形态**回写，未命中按档位序钳位）——绝不宣告或发出一个必被上游 400 的档位；
+- 逐模型显式条目在档位能力未知时也生效（那是用户对具体模型能力的声明）；通配则只在能力已知时生效；
+- `off` / `none` 请求、`thinking.type=disabled` 请求一律不注入（把用户关掉的思考又打开比 400 更坏，同 §1 第 1 条）；
+- 注入与越界回退都是**显式可见**的近似变换：归档 `rewritten` 记为 `reasoning.effort:默认→<档位>` /
+  `reasoning.effort:<原值>→<出站值>`，Responses 桥在响应体 `reasoning.effort` 回显实际生效值；
+  跨域重试时从原始入参重新构造回显，不沿用失败尝试的档位；
+- 归一位点在 handler 的 attempt 循环内（按**实际选中账号**的域解析），因为多号重试可能跨域；
+- **整表替换**（与 `fingerprint_rules` 这类 slice 字段同语义）：提交里出现该键 = 整张表被它替换
+  （删键、清空都生效）；不提交该键则保持磁盘现值。map 字段在 `encoding/json` 里默认是逐键**合并**，
+  所以配置解析层对这一项显式清空基准（`config.decodeInto`），所有调用方直接使用整表替换语义；
+  同次提交中大小写/首尾空白归一后重名的键直接报错，不随机挑选取值。§2 里
+  `growth.autotasks.tasks` 的「无法通过面板删键」是同一根因的另一面，未一并改动；
+- 全部热生效（进程级原子快照整体替换；面板「模型档位」页可视化编辑），无需重启。
 
 ---
 

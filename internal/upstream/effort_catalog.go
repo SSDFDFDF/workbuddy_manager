@@ -77,7 +77,7 @@ func staticEffortCap(realm, model string) effortCap {
 	return table[model]
 }
 
-// EffortListing 计算模型在 /v1/models 应暴露的 effort 能力（三级查找 + 默认档防御）。
+// EffortListing 计算模型在 /v1/models 应暴露的 effort 能力（四级查找 + 默认档防御）。
 //
 // remoteEfforts/remoteDefault 为远端（FetchModels / global 探测）已解析值；
 // remoteEfforts 非空时以其为权威（不回落到静态表），否则落到产品级静态兜底表；
@@ -87,6 +87,10 @@ func staticEffortCap(realm, model string) effortCap {
 // （对齐参考仓库 resolveModel 的 `defaultEffort ∈ efforts` 防御：不宣称不支持的默认档）。
 // remoteDefault 空串不回落到静态默认档——默认档随档位表同源：remote 有档位就用 remote 默认档，
 // 静态兜底档位就用静态默认档，避免跨源拼接出「档位是静态、默认档是 remote」的矛盾组合。
+//
+// 唯一压过上述同源规则的是本地覆盖（upstream.effort_default_overrides，见
+// effort_override.go）：命中时默认档换成本地值，且该值先被钳进本轮认定的支持集——
+// 宣告与「可被钳位/注入的档位」仍是同一份答案，客户端照宣告选档永不被判越界。
 func EffortListing(realm, model string, remoteEfforts []string, remoteDefault string) (efforts []string, defaultEffort string) {
 	var src effortCap
 	switch {
@@ -97,6 +101,10 @@ func EffortListing(realm, model string, remoteEfforts []string, remoteDefault st
 	}
 	if len(src.efforts) == 0 {
 		return nil, ""
+	}
+	// 本地默认档覆盖：本地的覆盖上游 defaultEffort 与静态兜底默认档。
+	if ov, ok := defaultOverrideForModel(realm, model, src.efforts); ok {
+		src.defaultEffort = ov
 	}
 	efforts = append([]string(nil), src.efforts...)
 	if src.defaultEffort != "" && containsEffort(efforts, src.defaultEffort) {
@@ -140,6 +148,21 @@ func isEffortOff(effort string) bool {
 // 入口本来也只会透传。上游对越界档位返回 400 code=11133 会白白消耗一次轮转并污染账号
 // 健康度（issue #84：deepseek-v4.1-flash 国际版只认 high）。
 func ClampEffort(requested string, supported []string) (string, bool) {
+	return clampEffort(requested, supported, "")
+}
+
+// ClampEffortWithDefault 与 ClampEffort 同语义，但**越界**（档位合法、只是本模型不支持）
+// 时的回退目标换成 preferred＝本地默认档覆盖（upstream.effort_default_overrides）。
+//
+// 与 ClampEffort 的差别只有一处：请求档位本身受支持时一律不动它——包括「同一个档位的
+// 书写形态归一」（"High"→"high"），那是受支持值的形态统一，不是越界回退。
+// preferred 为空 / 不在支持集里 / 是关闭思考值 → 完全回落 ClampEffort 既有规则
+// （降级优先、偏离最小）；未配置本地覆盖的部署行为逐字不变。
+func ClampEffortWithDefault(requested string, supported []string, preferred string) (string, bool) {
+	return clampEffort(requested, supported, preferred)
+}
+
+func clampEffort(requested string, supported []string, preferred string) (string, bool) {
 	req := strings.ToLower(strings.TrimSpace(requested))
 	if req == "" || len(supported) == 0 || isEffortOff(req) {
 		return "", false
@@ -147,6 +170,12 @@ func ClampEffort(requested string, supported []string) (string, bool) {
 	reqRank, known := effortRank[req]
 	if !known {
 		return "", false
+	}
+	// 越界回退目标只须是支持集声明的非关闭档位，不要求出现在静态排序表。
+	// 上游新档位也能作为本地默认档；rank 仅用于下方「最近档位」计算。
+	pref := strings.ToLower(strings.TrimSpace(preferred))
+	if isEffortOff(pref) {
+		pref = ""
 	}
 	best, bestRank := "", -1
 	lowest, lowestRank := "", 1<<30
@@ -161,7 +190,7 @@ func ClampEffort(requested string, supported []string) (string, bool) {
 		}
 		if sn == req {
 			if s != requested {
-				return s, true // 受支持，但按声明形态统一书写
+				return s, true // 受支持，但按声明形态统一书写（不是越界，回退目标不参与）
 			}
 			return "", false
 		}
@@ -170,6 +199,13 @@ func ClampEffort(requested string, supported []string) (string, bool) {
 		}
 		if r < lowestRank {
 			lowest, lowestRank = s, r
+		}
+	}
+	// 越界：本地默认档优先于「偏离最小」——用户把该模型的默认档显式配到那里，
+	// 越界请求就落到它（同样只采信支持集里的声明形态）。
+	if pref != "" {
+		if s, ok := declaredEffort(supported, pref); ok {
+			return s, true
 		}
 	}
 	if best != "" {
@@ -233,11 +269,54 @@ func (c *Client) RequestEffortClamp(obj map[string]any, realm, model string) (ke
 		return "", "", ""
 	}
 	supported, _ := c.EffortSupport(realm, model)
-	to, changed := ClampEffort(from, supported)
+	// 越界回退目标 = 本地默认档覆盖（未配置该模型 → 空串，语义与历史逐字一致）。
+	preferred, _ := defaultOverrideForModel(realm, model, supported)
+	to, changed := ClampEffortWithDefault(from, supported, preferred)
 	if !changed {
 		return key, from, from
 	}
 	return key, from, to
+}
+
+// RequestEffortDefault 计算「客户端未指定档位」时应注入的本地默认档覆盖，返回
+// (字段名, 出站档位)；不注入时两者皆空。
+//
+// 不注入的四类情形（前两类是客户端已表态，后两类是无依据/无配置）：
+//   - obj 带任一种档位别名（含 off/none——off 是「关掉思考」，不是没表态）；
+//   - obj 用 thinking.type=disabled 显式关闭思考（注入档位会与之冲突，且等于把用户
+//     关掉的思考又打开，与 ClampEffort 的同一条原则同源）；
+//   - 本地覆盖未命中该 realm+model（空表 = 零行为变化）；
+//   - 覆盖值无法落到支持集上（不会为了「有配置」而发一个必 400 的值）。
+//
+// 与 RequestEffortClamp 同样的「只读不写」契约：调用方决定是否写时拷贝。
+func (c *Client) RequestEffortDefault(obj map[string]any, realm, model string) (key, value string) {
+	if c == nil || obj == nil || model == "" {
+		return "", ""
+	}
+	if k, _ := requestEffortKey(obj); k != "" {
+		return "", ""
+	}
+	if thinkingDisabled(obj) {
+		return "", ""
+	}
+	supported, _ := c.EffortSupport(realm, model)
+	v, ok := defaultOverrideForModel(realm, model, supported)
+	if !ok {
+		return "", ""
+	}
+	return "reasoning_effort", v
+}
+
+// thinkingDisabled 报告请求是否显式关闭思考（thinking.type=disabled）。
+// forwarding.reasoning 已把「thinking.type=disabled 且 effort 非 off」判成非法，注入前
+// 必须自证不制造这种组合。
+func thinkingDisabled(obj map[string]any) bool {
+	th, ok := obj["thinking"].(map[string]any)
+	if !ok {
+		return false
+	}
+	t, _ := th["type"].(string)
+	return t == "disabled"
 }
 
 // SetRequestEffort 按 RequestEffortClamp 返回的字段名写回档位（reasoning.effort 走嵌套）。
