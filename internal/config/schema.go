@@ -270,6 +270,22 @@ type Config struct {
 		DeviceTokenFile string `json:"device_token_file"`
 		// PassthroughIP 是否透传客户端 IP 给上游（默认 false，反代安全边界）。
 		PassthroughIP bool `json:"passthrough_ip"`
+		// DeriveConversationID 客户端未带会话 id 时，是否把网关侧稳定会话键派生为
+		// UUIDv4 形态的 X-Conversation-ID 出站（默认 false = 历史行为：不伪造）。
+		//
+		// 为什么需要：官方客户端**总会**发会话 id（会话内恒定），而第三方客户端
+		// （Claude Code / Codex / pi / OpenAI SDK 等）普遍不带——上游于是看不到“同一
+		// 会话”，按会话聚合的上下文缓存/后台归集全都落空（同会话每轮都是冷前缀）。
+		//
+		// 开启后的行为：只在“客户端确实没给会话 id、且网关已算出稳定会话键
+		//（conversation_id / 客户端会话头 / prompt_cache_key / 内容派生键）”时派生；
+		// 派生值只出现在出站头（X-Conversation-ID / acp-connection-id）与缓存键材料里，
+		// 不返回给客户端。跨重启稳定（固定盐派生）。
+		//
+		// 语义边界：入站 body/header 里的会话 id **仍然不伪造**（配置不开启时行为与
+		// 历史逐字一致）；本项是网关自身的稳定会话身份，用于对齐官方客户端的“同会话
+		// 同身份”前提，需 A/B 观察到命中率/积分收益后再默认开。热生效。
+		DeriveConversationID bool `json:"derive_conversation_id"`
 		// EffortDefaultOverrides 模型「默认思考档」的本地覆盖（键 = 模型名，值 = 档位名）。
 		//
 		// 为什么需要：模型目录里的 reasoning.defaultEffort（远端探测）与静态兜底表的

@@ -213,7 +213,8 @@ func anthropicRequest(src map[string]any, dropped *[]string) (map[string]any, er
 			if err != nil {
 				return nil, err
 			}
-			switch b["type"] {
+			typ, _ := b["type"].(string)
+			switch typ {
 			case "text":
 				part, err := textPartFrom(b, bp, "text")
 				if err != nil {
@@ -286,9 +287,15 @@ func anthropicRequest(src map[string]any, dropped *[]string) (map[string]any, er
 				// Signed/opaque reasoning history cannot be represented in Chat;
 				// accept and drop it so thinking-enabled clients can replay their
 				// full transcript. The model re-reasons from the visible messages.
-				*dropped = append(*dropped, bp)
+				//
+				// 归档标记带类型（path:type）：只记路径时面板上看不出“被丢的是一个
+				// thinking 块”——而“思考历史能不能回放”正是思考模型（glm-5.3 这类
+				// onlyReasoning）前缀缓存与成本的关键观测项（此前无法量化）。
+				// 注意：此处**不改语义**（仍是丢弃）；改成映射到 assistant.reasoning
+				// 属于会改变提示词语义的变更，需先用本标记量出频率再小流量验证。
+				*dropped = append(*dropped, bp+":"+typ)
 			default:
-				*dropped = append(*dropped, bp)
+				*dropped = append(*dropped, bp+":"+typ)
 			}
 		}
 		if len(parts) > 0 || len(calls) > 0 {

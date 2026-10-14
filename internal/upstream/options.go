@@ -28,6 +28,12 @@ type Options struct {
 	DeviceTokenFile string
 	// PassthroughIP 是否把客户端 IP 透传给上游。
 	PassthroughIP bool
+	// DeriveConversationID 客户端未提供会话 id 时，是否把网关侧稳定会话键
+	//（convKey）派生为 UUIDv4 形态的 X-Conversation-ID 出站（upstream.derive_conversation_id）。
+	//
+	// 默认 false = 保持历史行为（客户端没给就不发，不伪造）；开启后官方没有的
+	// 第三方客户端也能获得上游的“同一会话”身份（会话维度上下文缓存/聚合的前提）。
+	DeriveConversationID bool
 	// ChatBaseCN CN 域 chat base（空 = 内置默认）。
 	ChatBaseCN string
 	// ChatBaseGlobal / BillingBaseGlobal global 域 base（空 = 内置默认）。
@@ -99,6 +105,12 @@ func (c *Client) staticOptions() Options {
 // StreamTimeoutsNow 返回当前 SSE 阶段上限（handler 每请求读取，热改即时生效）。
 func (c *Client) StreamTimeoutsNow() StreamTimeoutConfig {
 	return c.optsNow().StreamTimeouts
+}
+
+// DeriveConversationIDsNow 当前是否开启“派生会话 ID”出站
+// （见 Options.DeriveConversationID）。
+func (c *Client) DeriveConversationIDsNow() bool {
+	return c.optsNow().DeriveConversationID
 }
 
 // shortTimeoutNow 当前生效的短 RPC 总时长。

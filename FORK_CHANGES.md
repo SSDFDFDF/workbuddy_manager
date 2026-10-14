@@ -31,6 +31,10 @@
 | 16 | **模型目录门禁（显式刷新制）** | 出站前先查模型目录快照：快照可用而模型不存在 → 直接 `404 model_not_found`，不选号、不打上游；命中时顺带重排候选域与纠正大小写。快照为空 → fail-open。快照只在启动预热与面板「模型能力」页手动刷新时写入；客户端请求路径零上游探测 | 生效 |
 | 17 | **原生工具调用标记还原（DSML→tool_calls）** | 上游（DeepSeek 系）在请求**未声明 tools** 时把工具调用吐成全角竖线原生标记文本落进 `content`；本层在响应出站前识别并还原成结构化 `tool_calls`。流式与非流式共用同一帧管线（`consume` 内展开）。判定分两级：名单非空走严格比对，名单为空（tools 丢失常态）走弱判定（块完美闭合 + 工具名形如标识符）。硬前提：本 choice 无结构化 tool_calls（真实调用一律优先让位）、块内不夹带正文；拿不准一律原文回吐，**绝不吞字节**。属 §15 式**显式可见近似变换**：命中写入归档 `rewritten` 列（面板展示）+ 日志一行，非静默改写 | 生效（限 Chat/Responses/Messages 出站路径） |
 | 18 | **模型默认思考档本地覆盖** | 模型「默认档」此前是上游/编译期口径、用户改不了；本项让配置压过它（**本地的覆盖上游配置**）：命中即改 `/v1/models` 与面板宣告的 `reasoning_default_effort`、客户端未带档位时的出站注入、越界档位的回退目标三处（同源一份表）；取值先落到该模型的支持集上（绝不宣告/发出必 400 的档位），越界值不会发出；off/none（关闭思考）拒绝作为默认档；改动进归档 `rewritten` 列 + 日志（非静默）。见 §6 | 未配置 = 完全沿用上游 |
+| 19 | **模型容量队列（6020/6021/6022 + HTTP 202）** | 上游对热门/新模型会先入队再服务。此前 202 被当成 502（`upstream_queue_unsupported`）、业务码落通用 4xx（ErrClient）甚至被限流词表误判成 429 软冷却（**误罚健康账号**）。现按队列语义处理：识别 `code`/`bizCode` 结构化码与 HTTP 202，末端回 **429 + Retry-After**（`data.retry_after` 秒/毫秒两口径归一，或响应头）与带位置/容量/等待时长的 `gateway_hint`；账号**零惩罚、不轮转**（排队与账号健康无关，6020/6021 换号也不缩队）。见 §7 | 生效 |
+| 20 | **派生会话身份 `X-Conversation-ID`** | 官方客户端**总会**发会话 id；第三方客户端（Claude Code / Codex / pi / OpenAI SDK）普遍不带 → 上游看不到「同一会话」，会话维度的上下文缓存/后台归集全落空。本项在「客户端没给 + 网关已算出稳定会话键」时把会话键派生为 UUIDv4 形态出站（`session.DerivedConversationID`，固定盐 → **跨重启稳定**）；只进请求头与缓存键材料，不返回客户端。默认关（A/B 后再定）。见 §7 | `false` |
+| 21 | **出站形态补齐（对齐官方客户端）** | `X-Agent-Type` 恒发（入站优先，缺省按官方规则派生 `subagent`/`main`）；`X-Agent-Purpose` 入站优先（官方同链路也用 `conversation_topic`）；专家模式头 `X-Expert-Id` / `X-Expert-Team-Task` 透传（客户端没给不伪造）；**思考请求**补 `verbosity: "high"`（与官方 `modelSettings.text.verbosity` 同门控：与 `reasoning_summary: auto` 成对出现，非思考请求零改动） | 生效 |
+| 22 | **上游失败码与会话身份入观测** | 归档新增 `upstream_kind` / `upstream_code`（如 `model_queued` / `6020`、`model_blocked` / `11102`）与 `conversation_derived`；`dropped` 标记带块类型（`messages[1].content[0]:thinking`）。此前「上游到底回了什么码」「被丢的是不是 thinking 块」在归档里查不到，队列类问题的频率完全无法离线统计 | 生效 |
 
 第 17 条的判定与边界（细节以 `internal/upstream/dsml.go` 文件头为准）：
 
@@ -194,12 +198,68 @@ image part 与工具名不改（改写会破坏数据或契约）。
 
 ---
 
+## 7. 会话身份、上游失败码与缓存对齐（§1 第 19–22 条）
+
+### 7.1 背景：官方客户端靠什么拿到前缀缓存命中
+
+对 `WorkBuddy-win32-x64-user-5.6.2.39458645-35219ed6.exe`（Global）与 5.7.6（CN）两个安装包的
+完整逆向（`resources/app.asar` + `app.asar.unpacked/cli/dist/**`）结论：
+
+- **没有**任何针对具体模型的缓存开关：不发 `cache_control`、不发 `prompt_cache_key`；
+  唯一会写 `cache_control` 的规则（`CacheControlFormatRule`）挂在兼容处理层，而该层对
+  **官方网关域名直接 `return`**（`isProductGatewayHost`）——即官方产品路径一个缓存标记都不发。
+- 官方的高命中来自三条纪律，而不是机制：
+  1. **会话身份恒定**：`X-Conversation-ID`（会话内不变）+ `X-Conversation-Request-ID`（一次 user send 内
+     所有 tool 轮/重试复用同一值）+ `acp-connection-id`；
+  2. **前缀逐字不变**：系统提示词与工具集稳定；工具按 `promptCacheStability` 排序
+     （`orderToolsForPromptCache`：stable → 稳定 MCP 工具 → volatile → 其余），易变工具（ToolSearch/
+     Agent/Skill/Repl…）永远排在最后，避免增删时错位整块前缀；历史消息逐字回放（含 `reasoning`）；
+  3. **账号/落点不漂移**：连接级 failover 只换 origin 重放（`NetworkFailover` + `applyPinnedAddress`），
+     不换账号。
+- 与「glm-5.3 缓存极低」最相关的两条差异因此是：**会话身份缺失**（第三方客户端不带、网关不伪造）与
+  **思考历史可选回放**（glm-5.3 是 `onlyReasoning` 纯思考模型，思考体量最大）。
+- 官方还有一处 glm 专属配置（`product.json` 的 `fillToolCallContentModelWhitelist: ["glm","claude"]`），
+  但两个安装包里**没有任何 JS 消费它**（是死配置），且与缓存无关。
+
+### 7.2 本仓落地了什么（哪些默认生效、哪些默认关）
+
+| 项 | 默认 | 边界 |
+| --- | --- | --- |
+| 容量队列 429 + Retry-After + hint | 生效 | 只认结构化 `code`/`bizCode`（6020/6021/6022）与 HTTP 202；不猜文案（6022 文案常含 "limit"，会被限流词表误伤）。账号零惩罚、不轮转；`data.retry_after` <1000 视为秒、≥1000 视为毫秒，夹在 [1s, 2h] 之外丢弃 |
+| `X-Agent-Type` 恒发 / `X-Agent-Purpose` 透传 / 专家头透传 | 生效 | 入站值优先；缺省派生规则与官方 `resolveAgentType()` 一致（有 parent = subagent，否则 main）；专家头客户端没给就不发 |
+| 思考请求补 `verbosity: "high"` | 生效 | 门控与官方一致：只在 `reasoning_effort`/`reasoning.effort` 非空或 `thinking.type=enabled` 且客户端自带值缺失时注入（与 `reasoning_summary: auto` 成对）；`off`/`none`/`disabled` 不注入 |
+| 归档 `upstream_kind`/`upstream_code`/`conversation_derived`、`dropped` 带块类型 | 生效 | 只记码不记正文；`dropped` 上限 8 条不变（类型后缀不增加条目数） |
+| `upstream.derive_conversation_id` | **`false`** | 只在「客户端没给会话 id + 网关算出稳定会话键」时派生；派生值只进请求头/缓存键材料，**不返回客户端**，也不污染入站语义（入站仍不伪造）。开启后 A/B 观察到收益再改默认 |
+
+未做（有意留下，避免一次改动里混入语义变更）：
+
+- **思考回放**：Anthropic 桥接仍**丢弃** `thinking`/`redacted_thinking`（只是归档标记带上类型以便量化频率）。
+  把 thinking 映射到 assistant 的 `reasoning` 会改变提示词语义（回答风格/长度可能变化），
+  需先用 §7.3 的频率数据 + 小流量质量抽检验证。
+- 逐消息元数据注入（`conversationRequestId`/`messageId`/`entryId`/`model`/`queuePosition`…）、
+  连接级 origin failover、`Accept-Encoding: br`。
+
+### 7.3 怎么判断这些改动值不值（用本仓已有的仪表）
+
+1. **先量化队列与丢弃**（改动前无法离线统计，现已入档）：
+   `request-logs` 里筛 `upstream_code=6020/6021/6022` 与 `dropped` 含 `:thinking` 的记录数——
+   这两个频率直接决定第 19 条与「思考回放」的优先级。
+2. **会话身份 A/B**：`upstream.derive_conversation_id` 开关前后同模型对比
+   「缓存命中率 × 积分/1M Token」（面板「用量」两列同表）；同时看 `conversation_derived` 计数确认生效。
+3. **把折扣算成钱**：逐请求样本回归 `credit ≈ a·miss_tokens + b·hit_tokens + c·completion_tokens`，
+   `a/b` 即上游实际给的缓存折扣；再按
+   `月省 ≈ 月 token × 面板「积分/1M Token」× (1 − 1/折扣) × 命中率提升` 折算。
+4. **回滚口径**：第 20 条一个布尔开关即可回退；第 19/21/22 条是纯增量（不改既有成功路径的字节）。
+
+---
+
 ## 附：同步记录
 
 | 日期 | 并入范围 | 内容 |
 | --- | --- | --- |
 | 2026-10-08 | `e05edb7..d66384d`（5 个实质提交） | 企业版账号能力门控 + 企业额度分流（`get-enterprise-user-usage`）；暂停选号单列统计；到期提醒按到期时间排序；图表 tooltip 归位 `<g>`；夜猫子门控测试时钟钉住；版本号 `1.13.0-panel`。已同时移植上游 5 个测试文件与 2 个前端用例 |
 | 2026-10-11 | 上游 `7595a0a`（能力吸收，非整提交合入） | **原生工具调用标记还原（DSML→tool_calls）**：先在 fork 上用上游生产夹具复现「未声明 tools 时标记泄漏成正文」，确认是 fork 真实能力缺口；按 fork 自身 `StreamOption`/`ConsumeCompletion` 重写还原层（非移植上游 handler 接线），流式/非流式/整包快照共用 `consume` 内帧展开；落地姿态从上游「静默改写」换成 §15 式「显式可见」（归档 `rewritten` + 日志）。上游同批的 `8391a05`（面板按需拉取）不合入：改的是 fork 不存在的 `internal/panel/app.js`，且诉求已被 fork 的 `ExpiryCard` 缓存方案覆盖 |
+| 2026-10-14 | 本仓（客户端逆向对齐，§7） | **容量队列 6020/6021/6022 + HTTP 202** 从 502/通用 4xx 改为 429 + Retry-After + 带量化信息的 `gateway_hint`（账号零惩罚、不轮转）；**派生会话身份** `upstream.derive_conversation_id`（默认关，A/B 用）；`X-Agent-Type` 恒发 + `X-Agent-Purpose`/专家头透传 + 思考请求补 `verbosity=high`；归档新增 `upstream_kind`/`upstream_code`/`conversation_derived`，`dropped` 标记带块类型。依据：5.6.2/5.7.6 官方客户端 bundle 逆向（官方产品路径不发任何缓存标记，高命中来自会话身份恒定 + 前缀逐字不变 + 不换号） |
 
 > 同步方式：fork 与上游无共同祖先，采用「按文件取上游版本 + 手工 port」，不用 rebase / cherry-pick。
 > 更早的基线 `e05edb7` 为 fork 首次记录差异时的比对点；其后上游提交均已按上表并入。

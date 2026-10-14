@@ -294,6 +294,22 @@ function RequestDetailRow({ e, onCopy }: { e: RequestEvent; onCopy: (text: strin
                 <span className="ml-1 text-[var(--ink-2)]">{e.dropped.join(' · ')}</span>
               </div>
             )}
+            {/* 上游失败码与会话身份：回答「上游到底回了什么码」（队列 6020 等）与
+                「这次会话身份是客户端给的还是网关派生的」。 */}
+            {(e.upstream_kind || e.upstream_code || e.conversation_derived) && (
+              <div className="col-span-2 border-t border-[var(--line-soft)] pt-1.5 text-[11.5px]">
+                <span className="font-medium text-[var(--warn)]">上游失败码：</span>
+                <span className="ml-1 text-[var(--ink-2)]">
+                  {e.upstream_kind ? `kind=${e.upstream_kind}` : ''}
+                  {e.upstream_code ? ` · code=${e.upstream_code}` : ''}
+                </span>
+                {e.conversation_derived ? (
+                  <span className="ml-2 rounded bg-[var(--surface-2)] px-1.5 py-0.5 text-[10.5px] text-[var(--ink-3)]" title="客户端未给会话 id，X-Conversation-ID 由网关派生">
+                    会话身份：网关派生
+                  </span>
+                ) : null}
+              </div>
+            )}
           </div>
         </div>
       </div>

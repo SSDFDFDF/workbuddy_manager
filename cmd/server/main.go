@@ -803,16 +803,17 @@ func blackcatWindowFrom(cfg *config.Config) *scheduler.CountWindow {
 // 避免两处各写一份导致“热改后与重启后行为不一致”）。
 func upstreamOptions(cfg *config.Config) upstream.Options {
 	return upstream.Options{
-		Profiles:          cfg.Upstream.Profiles,
-		ClientName:        cfg.Upstream.ClientName,
-		DeviceToken:       cfg.Upstream.DeviceToken,
-		DeviceTokenFile:   cfg.Upstream.DeviceTokenFile,
-		PassthroughIP:     cfg.Upstream.PassthroughIP,
-		ChatBaseCN:        cfg.Upstream.ChatBaseCN,
-		ChatBaseGlobal:    cfg.Global.ChatBase,
-		BillingBaseGlobal: cfg.Global.BillingBase,
-		GlobalEnabled:     cfg.Global.Enabled,
-		IdleTimeout:       time.Duration(cfg.Upstream.IdleTimeoutSeconds) * time.Second,
+		Profiles:             cfg.Upstream.Profiles,
+		ClientName:           cfg.Upstream.ClientName,
+		DeviceToken:          cfg.Upstream.DeviceToken,
+		DeviceTokenFile:      cfg.Upstream.DeviceTokenFile,
+		PassthroughIP:        cfg.Upstream.PassthroughIP,
+		DeriveConversationID: cfg.Upstream.DeriveConversationID,
+		ChatBaseCN:           cfg.Upstream.ChatBaseCN,
+		ChatBaseGlobal:       cfg.Global.ChatBase,
+		BillingBaseGlobal:    cfg.Global.BillingBase,
+		GlobalEnabled:        cfg.Global.Enabled,
+		IdleTimeout:          time.Duration(cfg.Upstream.IdleTimeoutSeconds) * time.Second,
 		StreamTimeouts: upstream.StreamTimeoutConfig{
 			FirstModelEvent: time.Duration(cfg.Upstream.FirstModelEventSeconds) * time.Second,
 			FirstGeneration: time.Duration(cfg.Upstream.FirstGenerationSeconds) * time.Second,

@@ -45,6 +45,7 @@ const (
 	ErrWafBlock                      // 403 + 非业务信封体（APISIX WAF 拦截页/空体）→ 账号软冷却 + 抖动退避
 	ErrPromptTooLong                 // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
 	ErrImageInvalid                  // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
+	ErrModelQueued                   // 6020/6021/6022 或 HTTP 202「模型容量队列」→ 可重试语义：不罚号、不轮转，末端 429 + Retry-After 透传原文
 	ErrClient                        // 其他 4xx / 业务错误
 )
 
@@ -74,6 +75,8 @@ func (k ErrKind) String() string {
 		return "image_invalid"
 	case ErrAccountFault:
 		return "account_fault"
+	case ErrModelQueued:
+		return "model_queued"
 	case ErrClient:
 		return "client"
 	default:
@@ -515,6 +518,14 @@ func Classify(status int, body string) ErrKind {
 		if strings.Contains(lower, strings.ToLower(m)) || strings.Contains(body, m) {
 			return ErrAccountFault
 		}
+	}
+	// 模型容量队列（6020 等待 / 6021 队列满 / 6022 用户上限）：必须判在 status==429
+	// 与限流/额度词表**之前**——上游可以用 429 承载它，6022 的文案也常含 "limit"；
+	// 落到 ErrSoftRate 会给一个完全健康的账号记 429 软冷却（纯误罚），而排队的正确
+	// 语义是「等上游放行或换模型」（可重试、与账号健康无关）。只认结构化 code
+	// （code / bizCode），不做文案猜测。
+	if QueueCode(body) != "" {
+		return ErrModelQueued
 	}
 	// 14018 是明确的账号积分耗尽业务码。它必须先于通用 429 兜底，否则会被误判为
 	// 可自愈的软限流并在全池冷却时反复兜底选中（issue #175）。仅按结构化 code
@@ -1261,9 +1272,30 @@ func (c *Client) ChatStreamInput(ctx context.Context, a *auth.Auth, in ChatInput
 			return nil, resp.StatusCode, raw, ue
 		}
 		if resp.StatusCode == http.StatusAccepted {
+			// 202 = 上游「已受理 / 排队中」（模型容量队列的 HTTP 形态）。
+			// 旧行为是直接丢成 502 ErrServer(upstream_queue_unsupported)：客户端
+			// 看不到排队语义与等待时长，运维也无法区分「上游在排队」与「上游故障」。
+			// 现按队列语义返回：429 + Retry-After（data.retry_after 或响应头），
+			// body 原文一并带回供透传；账号零惩罚（排队与账号健康无关）。
+			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 			resp.Body.Close()
 			cancel()
-			return nil, 502, nil, &Error{Kind: ErrServer, Status: 502, Msg: "upstream_queue_unsupported"}
+			ue := &Error{Kind: ErrModelQueued, Status: http.StatusTooManyRequests,
+				Msg: truncate(string(raw), 200)}
+			if ue.Msg == "" {
+				ue.Msg = "upstream accepted the chat request without serving it (202 model capacity queue)"
+			}
+			if info, ok := ParseQueueInfo(string(raw)); ok {
+				ue.RetryAfter = info.RetryAfter
+			}
+			if ue.RetryAfter <= 0 {
+				if d, ok := ParseRetryAfter(resp.Header); ok {
+					ue.RetryAfter = d
+				}
+			}
+			log.Printf("WARN: [upstream] chat_stream acct=%s: upstream 202 queued kind=%s retryAfter=%s body=%s",
+				logfmt.Label(a.UID, a.NicknameValue()), ue.Kind, ue.RetryAfter, truncate(string(raw), 200))
+			return nil, http.StatusTooManyRequests, raw, ue
 		}
 		// 成功分支：cancel 所有权交给 monitorBody（其 Close 会 cancel）；
 		// IdleTimeout<=0 时 monitorBody 原样返回底流、无人调 cancel——可接受：

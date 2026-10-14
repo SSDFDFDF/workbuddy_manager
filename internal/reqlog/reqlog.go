@@ -89,6 +89,20 @@ type Event struct {
 	// 客户端字段，已去重与限长。用途是真实客户端排障：回答“它发了什么被我们丢了”。
 	Dropped []string `json:"dropped,omitempty"`
 
+	// UpstreamKind / UpstreamCode：本次失败的上游分类与业务码（如 model_queued /
+	// 6020、model_blocked / 11102、soft_rate / 6004）。
+	//
+	// 为什么入档：在这两个字段之前，“上游到底回了什么码”只存在于上游层的 stdout
+	// 日志（200 字符截断）或响应正文里，归档层看不到——队列（6020/6021/6022）这类
+	// 新机制的出现频率因此完全无法离线统计（价值评估时只能估）。只记码不记正文，
+	// 不增加隐私面。
+	UpstreamKind string `json:"upstream_kind,omitempty"`
+	UpstreamCode string `json:"upstream_code,omitempty"`
+
+	// ConversationDerived 本次出站的 X-Conversation-ID 是否由网关派生（客户端没给
+	// 会话 id、且 upstream.derive_conversation_id 开启）。A/B 观测会话身份策略用。
+	ConversationDerived bool `json:"conversation_derived,omitempty"`
+
 	// Rewritten 是网关**主动改写**的生成参数（key:原值→出站值）。当前两类：越界
 	// reasoning effort 归一；模型原生工具调用标记还原（正文里的标记 → tool_calls）。
 	// 与 Dropped 分开的原因：

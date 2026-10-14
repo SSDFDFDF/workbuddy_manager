@@ -143,15 +143,26 @@ func (c *Client) injectCodeBuddyRequest(req *http.Request) {
 // messageID（消息级，每条独立）由 ChatHeaders 内部生成，无需外部可见。
 type ChatMeta struct {
 	PrincipalID           string
-	ConversationID        string // X-Conversation-ID：body 提取的入站值，空则不发（透传优先，不伪造）
+	ConversationID        string // X-Conversation-ID：body 提取的入站值（或配置开启时的派生值），空则不发
 	ConversationRequestID string // X-Conversation-Request-ID / X-Root-Request-ID：聚合主键，必发
 	TraceID               string
 	RootRequestID         string
 	ParentConversationID  string
-	AgentType             string
-	Traceparent           string
-	B3TraceID             string
-	ACPConnectionID       string // acp-connection-id：官方客户端会话连接标识（UUIDv4）
+	AgentType             string // X-Agent-Type：入站透传优先；空时按 parentConversationId 派生 main/subagent
+	// AgentPurpose X-Agent-Purpose：入站透传优先（官方在同一条链路用 conversation /
+	// conversation_topic 两个值）；空时由 injectAttribution 给出官方缺省 conversation。
+	AgentPurpose string
+	// ExpertID / ExpertTeamTask：专家模式头族（X-Expert-Id / X-Expert-Team-Task）。
+	//
+	// 来源：桌面端把“专家插件的内部模型请求头”下发给 CLI（main/server.js 的
+	// internalModelRequestHeaders：X-Expert-Id=expertId，团队专家另加
+	// X-Expert-Team-Task=true），再由 CLI 注入 chat 请求。客户端传了就要透传——
+	// 这两个头决定上游按专家/团队专家链路计费与路由，丢掉等于把专家会话降级为普通会话。
+	ExpertID        string
+	ExpertTeamTask  string
+	Traceparent     string
+	B3TraceID       string
+	ACPConnectionID string // acp-connection-id：官方客户端会话连接标识（UUIDv4）
 }
 
 // ChatHeaders 在 common 之上加 chat 专属的账号头。
@@ -278,8 +289,29 @@ func (c *Client) injectConversationHeaders(req *http.Request, meta ChatMeta) {
 	if meta.ParentConversationID != "" {
 		req.Header.Set("X-Parent-Conversation-ID", meta.ParentConversationID)
 	}
-	if meta.AgentType != "" {
-		req.Header.Set("X-Agent-Type", meta.AgentType)
+	// X-Agent-Type：官方 resolveAgentType() **恒发**（team / subagent / main）——
+	// 入站透传优先，缺省按官方同款规则派生：有 parentConversationId = subagent，
+	// 否则 main。此前缺省时一个都不发，上游只能按“无 agent 类型”归类。
+	agentType := meta.AgentType
+	if agentType == "" {
+		if meta.ParentConversationID != "" {
+			agentType = "subagent"
+		} else {
+			agentType = "main"
+		}
+	}
+	req.Header.Set("X-Agent-Type", agentType)
+	// X-Agent-Purpose：入站透传优先（官方同一条链路用 conversation / conversation_topic
+	// 两值）；未提供时保持 injectAttribution 写入的官方缺省 conversation。
+	if meta.AgentPurpose != "" {
+		req.Header.Set("X-Agent-Purpose", meta.AgentPurpose)
+	}
+	// 专家模式头族：客户端传了才发（不伪造专家身份）。
+	if meta.ExpertID != "" {
+		req.Header.Set("X-Expert-Id", meta.ExpertID)
+	}
+	if meta.ExpertTeamTask != "" {
+		req.Header.Set("X-Expert-Team-Task", meta.ExpertTeamTask)
 	}
 	traceID := meta.TraceID
 	if traceID == "" {

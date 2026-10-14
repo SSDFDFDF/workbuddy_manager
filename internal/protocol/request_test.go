@@ -188,7 +188,7 @@ func TestUnknownInputAndBlockTypesDropped(t *testing.T) {
 		`"tools":[{"name":"f","input_schema":{"type":"object"},"strict":true,"defer_loading":true}],`+
 		`"messages":[{"role":"user","content":[{"type":"custom_block","data":"x"},{"type":"text","text":"hi"}]}]}`)
 	if !containsString(ant.Dropped, "custom_field") || !containsString(ant.Dropped, "tools[0].strict") ||
-		!containsString(ant.Dropped, "tools[0].defer_loading") || !containsString(ant.Dropped, "messages[0].content[0]") {
+		!containsString(ant.Dropped, "tools[0].defer_loading") || !containsString(ant.Dropped, "messages[0].content[0]:custom_block") {
 		t.Fatalf("expected dropped anthropic fields: %v", ant.Dropped)
 	}
 }
@@ -214,7 +214,7 @@ func TestAnthropicThinkingAcceptedAndDropped(t *testing.T) {
 	if got := msgs[2].(map[string]any)["content"]; got != "[tool error] boom" {
 		t.Fatal(got)
 	}
-	for _, k := range []string{"thinking", "messages[1].content[0]", "messages[1].content[1]"} {
+	for _, k := range []string{"thinking", "messages[1].content[0]:thinking", "messages[1].content[1]:redacted_thinking"} {
 		if !containsString(r.Dropped, k) {
 			t.Fatalf("dropped list missing %s: %v", k, r.Dropped)
 		}

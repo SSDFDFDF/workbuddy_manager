@@ -393,9 +393,43 @@ func EncodeObject(obj map[string]any, model string) {
 	} else if effort != "" {
 		obj["reasoning_effort"] = effort
 	}
+	// verbosity：与 reasoning_summary 同源、同门控——官方客户端只在**思考开启**时
+	// 把 modelSettings.text.verbosity 置为 "high"（5.6.2 CLI：thinkingEnabled 分支里
+	// 同时设 reasoning.summary="auto" 与 text.verbosity="high"），SDK 再映射成 body
+	// 的 verbosity（5.7.6 实机抓包逐字可见）。网关此前只补了 reasoning_summary，
+	// 少了这一半；补上后“思考请求的出站形态”与官方一致。
+	//
+	// 门控在思考开启（effort 非空且不是 off，或 thinking.type==enabled）且客户端没自带
+	// verbosity 时注入：非思考请求零行为变化（官方对它们也不发这个字段）。
+	if _, ok := obj["verbosity"]; !ok && thinkingEnabledForVerbosity(obj) {
+		obj["verbosity"] = "high"
+	}
 }
 
-// Encode performs only declared WorkBuddy wire conversions. No model-name heuristics.
+// thinkingEnabledForVerbosity 报告出站 body 是否“思考开启”（官方客户端
+// enableThinking() 的请求侧等价判据：带 reasoning_effort / reasoning.effort，
+// 或 thinking.type == "enabled"）。
+//
+// 调用时机：EncodeObject 末尾（effort 已归一、thinking 已定形）——只看最终形态，
+// 不再猜客户端意图；off/none 已在前面删掉 reasoning_effort 并置 disabled，天然为假。
+func thinkingEnabledForVerbosity(obj map[string]any) bool {
+	if v, ok := obj["reasoning_effort"].(string); ok && strings.TrimSpace(v) != "" {
+		return true
+	}
+	if m, ok := obj["reasoning"].(map[string]any); ok {
+		if v, ok := m["effort"].(string); ok && strings.TrimSpace(v) != "" {
+			return true
+		}
+	}
+	if m, ok := obj["thinking"].(map[string]any); ok {
+		if v, _ := m["type"].(string); v == "enabled" {
+			return true
+		}
+	}
+	return false
+}
+
+// Encode 执行声明的 WorkBuddy 线格式转换。不做模型名启发式。
 func (r *Request) Encode(model string) ([]byte, error) {
 	// The document belongs to this request; each encoding starts from a fresh copy.
 	obj := jsondoc.CopyObject(r.Object)

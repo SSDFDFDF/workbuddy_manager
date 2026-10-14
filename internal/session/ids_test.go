@@ -145,3 +145,56 @@ func TestTurnRequestIDDerivation(t *testing.T) {
 		}
 	}
 }
+
+// TestDerivedConversationID 派生会话 ID：跨调用/跨进程恒定（固定盐 → 同值可复算）、
+// UUIDv4 形态（官方 X-Conversation-ID 同形）、异键互异、空键不伪造。
+//
+// 「跨进程恒定」用**复算期望值**钉住（下面按固定盐重算一遍）：若把进程随机盐
+// （deriveSalt）误用到这条路径，复算值会与实得值不符，本断言即失败。
+func TestDerivedConversationID(t *testing.T) {
+	key := "conv-key-1"
+	first := DerivedConversationID(key)
+	if first != DerivedConversationID(key) {
+		t.Fatalf("derivation must be deterministic: %q", first)
+	}
+	sum := sha256.Sum256([]byte(conversationIDDeriveSalt + "|" + key))
+	b := sum[:16]
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	hexed := hex.EncodeToString(b)
+	want := hexed[0:8] + "-" + hexed[8:12] + "-" + hexed[12:16] + "-" + hexed[16:20] + "-" + hexed[20:32]
+	if first != want {
+		t.Fatalf("derived=%q want recomputed=%q (固定盐口径被改？)", first, want)
+	}
+	for i, r := range first {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			if r != '-' {
+				t.Fatalf("expected dash at %d: %q", i, first)
+			}
+			continue
+		}
+		if !strings.ContainsRune("0123456789abcdef", r) {
+			t.Fatalf("unexpected rune %q in %q", r, first)
+		}
+	}
+	if other := DerivedConversationID("conv-key-2"); other == first {
+		t.Fatalf("different keys must derive different ids: %q", other)
+	}
+	if DerivedConversationID("") != "" {
+		t.Fatal("empty key must not fabricate an id")
+	}
+}
+
+// TestDerivedConversationIDStableAcrossRestartSalt 说明派生盐与进程随机盐的边界：
+// 会话 ID 必须跨重启恒定（期望值写死），而 RequestIDForKey 走进程盐（不写死）。
+func TestDerivedConversationIDStableAcrossRestartSalt(t *testing.T) {
+	// 固定盐口径：同一输入在任何一次测试运行里都必须得到同一个值。
+	if a, b := DerivedConversationID("stable"), DerivedConversationID("stable"); a != b {
+		t.Fatalf("unstable: %q vs %q", a, b)
+	}
+	// 进程盐口径对照：deriveSalt 是运行期随机盐，所以这里只断言长度/自洽，
+	// 不断言具体值（断言具体值会让测试随盐漂移）。
+	if got := RequestIDForKey("stable"); len(got) != 32 {
+		t.Fatalf("RequestIDForKey len=%d", len(got))
+	}
+}

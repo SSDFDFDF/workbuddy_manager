@@ -78,6 +78,34 @@ func RequestIDForKey(key string) string {
 	return hex.EncodeToString(sum[:16])
 }
 
+// conversationIDDeriveSalt 派生会话 ID 的固定盐。
+//
+// 为什么与 deriveSalt（进程随机）**不同**：派生会话 ID 的用途是给上游一个恒定的
+// 会话身份（会话维度的上下文缓存 / 后端聚合），因此必须**跨重启稳定**——重启后
+// 同一对话换一个 ID，等于把缓存连续性切断并可能让上游多建一个会话记录。
+// 代价是“外部能按会话键预计算派生值”，但这里没有任何秘密可推：会话键本身就是
+// 客户端提供的（conversation_id / 客户端会话头 / prompt_cache_key）或由内容派生。
+const conversationIDDeriveSalt = "wb2c:"
+
+// DerivedConversationID 把网关侧的稳定会话键派生为 UUIDv4 形态的会话 ID
+// （与官方 X-Conversation-ID 同形，如 bbbaf8ac-ae2a-4207-bc33-a558e5a93906）。
+//
+// 仅在“客户端没给会话 id、但网关算出了稳定会话键”且配置显式开启
+// （upstream.derive_conversation_id）时使用；空键返回空串（不伪造）。
+func DerivedConversationID(convKey string) string {
+	if convKey == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(conversationIDDeriveSalt + "|" + convKey))
+	b := sum[:16]
+	// UUID v4 版本位 + RFC 4122 变体位：上游拿到的是一枚合法 UUIDv4（不靠形态
+	// 也能用，但形态一致的 ID 不会在风控/日志侧显出异常）。
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	h := hex.EncodeToString(b)
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+}
+
 // TurnKey 派生「对话轮级」聚合键：body 里**最后一条** role=="user" 消息的
 // 「序号 + 文本」。
 //

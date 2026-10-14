@@ -108,6 +108,13 @@ export interface RequestEvent {
   // rewritten：网关主动改写的生成参数（key:原值→出站值），如越界 reasoning effort 归一。
   // 与 dropped 分开：改写是「换了值执行了」，且不会被 dropped 的数量上限挤掉。
   rewritten?: string[];
+  // upstream_kind / upstream_code：本次失败的上游分类与业务码（如 model_queued / 6020）。
+  // 只记码不记正文；用于回答「上游到底回了什么码」（队列 6020/6021/6022、11102、6004 …）。
+  upstream_kind?: string;
+  upstream_code?: string;
+  // conversation_derived：本次出站的 X-Conversation-ID 是网关派生（客户端未给会话 id、
+  // 且 upstream.derive_conversation_id 开启）。A/B 观测会话身份策略用。
+  conversation_derived?: boolean;
 }
 
 export interface RequestMetrics {

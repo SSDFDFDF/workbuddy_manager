@@ -80,6 +80,16 @@ type chatStat struct {
 
 	// 跨协议接受但无法表达的客户端字段（opts 入口采集，出口写入 reqlog.Event）。
 	dropped []string
+
+	// 上游失败的分类与业务码（如 model_queued / 6020）。首次写入优先（首次失败的
+	// 原因才是给客户端看的那个；后续重试可能产生派生失败）。
+	upstreamKind string
+	upstreamCode string
+
+	// conversationDerived 本次出站的 X-Conversation-ID 是网关派生（客户端没给
+	// 会话 id、且 upstream.derive_conversation_id 开启），供归档/排障区分
+	// “客户端给的会话身份”与“网关派生”。
+	conversationDerived bool
 	// 网关主动改写的生成参数（key:原值→出站值）。与 dropped 分开：语义不同
 	//（执行了 vs 没执行），且不能被客户端遥测字段占满的 dropped 上限挤掉。
 	// 当前两类：越界 reasoning effort 归一；模型原生工具调用标记还原（dsml.go）。
@@ -96,10 +106,22 @@ const maxDroppedFields = 8
 const maxRewrittenFields = 4
 
 // noteRewrite 记录一次主动改写（key:原值→出站值）：去重 + 限长。
-//
 // 为什么不经 droppedFields：改写路径在轮转循环里逐 attempt 产生（多号重试可能命中不同
 // realm 的能力表），而 droppedFields 只在入口调一次；若两者共用一个列表，重试会产生
 // 重复项，且被客户端的遥测字段挤掉最需要被看见的改写记录。
+// noteUpstreamError 记录本次上游失败的分类与业务码（首次写入优先）。
+//
+// 首次优先的理由：客户端最终看到的是**第一次**失败的原因（非 ErrModelBlocked 的
+// 分类一律终止轮转）；后续重试若也失败，其码属于派生现象，写进归档反而误导排障。
+func (s *chatStat) noteUpstreamError(kind, code string) {
+	if s.upstreamKind == "" && kind != "" {
+		s.upstreamKind = kind
+	}
+	if s.upstreamCode == "" && code != "" {
+		s.upstreamCode = code
+	}
+}
+
 func (s *chatStat) noteRewrite(entry string) {
 	for _, old := range s.rewritten {
 		if old == entry {
@@ -446,6 +468,9 @@ func (t *requestTrace) event(status int) reqlog.Event {
 		e.HasCredit = s.hasCredit
 		e.CacheHitTokens = s.cacheHit
 		e.CacheMissTokens = s.cacheMiss
+		e.UpstreamKind = s.upstreamKind
+		e.UpstreamCode = s.upstreamCode
+		e.ConversationDerived = s.conversationDerived
 		e.PromptMode = s.promptMode
 		e.PromptPreset = s.promptPreset
 		e.PromptSHA = s.promptSHA

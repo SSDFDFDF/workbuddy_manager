@@ -103,6 +103,7 @@
     "device_token": "",
     "device_token_file": "",
     "passthrough_ip": false,
+    "derive_conversation_id": false,
     "effort_default_overrides": {}
   },
   "prompt": {

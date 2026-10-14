@@ -862,22 +862,44 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 	// 循环外**生成一次，循环内每次出站原样复用 → 换号/重试/降级全部同 ID，后台不再
 	// 碎片化（此前网关一个都不发，上游按 HTTP 请求逐条记账，同一对话几十上百个
 	// RequestID）。
-	//   - conversationID：body 提取（透传客户端原值，缺省空串——不伪造）；
+	//   - conversationID：body 提取（透传客户端原值；缺省空串 = 不伪造，除非
+	//     upstream.derive_conversation_id 开启——见下方派生分支）；
 	//   - conversationRequestID：入站 X-Conversation-Request-ID 透传优先，否则按
 	//     粘性 key 进程内稳定生成；粘性 key 也空时走轮级兜底（TurnKey/TurnRequestID），
 	//     无 user 消息时退化成本请求级随机——轮转内捕获一次即共享；
 	//   - messageID 在 ChatHeaders 内每条消息生成（消息级独立，无需外部可见）。
+	//
+	// 派生会话 ID（可选，默认关）：官方客户端**总会**带 X-Conversation-ID，而第三方
+	// 客户端（Claude Code / Codex / pi / OpenAI SDK）不带——上游于是无法把同一对话的
+	// 多轮归到一个会话（会话维度的上下文缓存/聚合全部落空）。开启后只在“客户端确实
+	// 没给会话 id、而网关自己算出了稳定会话键（convKey）”时，把 convKey 派生为
+	// UUIDv4 形态的会话 id 出站（不进入响应、不返回客户端）。
+	conversationID := peek.ConversationID
+	deriveConversationID := false
+	if conversationID == "" && h.cfg.Upstream != nil && h.cfg.Upstream.DeriveConversationIDsNow() && convKey != "" {
+		conversationID = session.DerivedConversationID(convKey)
+		deriveConversationID = true
+	}
 	chatMeta := upstream.ChatMeta{
 		PrincipalID:           principalID,
-		ConversationID:        peek.ConversationID,
+		ConversationID:        conversationID,
 		ConversationRequestID: r.Header.Get("X-Conversation-Request-ID"),
 		RootRequestID:         r.Header.Get("X-Root-Request-ID"),
 		ParentConversationID:  r.Header.Get("X-Parent-Conversation-ID"),
 		AgentType:             r.Header.Get("X-Agent-Type"),
+		AgentPurpose:          r.Header.Get("X-Agent-Purpose"),
+		ExpertID:              r.Header.Get("X-Expert-Id"),
+		ExpertTeamTask:        r.Header.Get("X-Expert-Team-Task"),
 		TraceID:               r.Header.Get("X-Trace-ID"),
 		Traceparent:           r.Header.Get("traceparent"),
 		B3TraceID:             r.Header.Get("X-B3-TraceId"),
 		ACPConnectionID:       r.Header.Get("acp-connection-id"),
+	}
+	if deriveConversationID {
+		// 归档可见性：归档里能回答“这次出站的会话身份是客户端给的还是网关派生的”
+		//（A/B 与排障都要）。不进 rewritten 列表：那是“改写生成参数”的短清单，
+		// 派生会话 id 是每个请求都会发生的事实，会把它挤满。
+		st.conversationDerived = true
 	}
 	if chatMeta.ConversationRequestID == "" {
 		chatMeta.ConversationRequestID = session.NewMessageID()
@@ -1100,6 +1122,18 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 				kind = upstream.Classify(status, string(respBody))
 				uerr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
 			}
+			// 上游业务码入观测（归档 upstream_kind / upstream_code）：回答“上游到底回了
+			// 什么码”（队列 6020/6021/6022、11102、6004 …）。此前这些只存在于上游层的
+			// stdout 日志（200 字符截断），归档层完全看不到——于是队列这类新机制的
+			// 出现频率无法离线统计。
+			st.noteUpstreamError(kind.String(), upstream.BusinessCode(string(respBody)))
+			// 排队等待时长回落 body：上游可能在 data.retry_after 里给（HTTP 头未必有），
+			// 队列语义下这个值是给客户端“何时重试”的唯一依据，不能丢。
+			if kind == upstream.ErrModelQueued && uerr.RetryAfter <= 0 {
+				if d := upstream.QueueRetryAfter(string(respBody)); d > 0 {
+					uerr.RetryAfter = d
+				}
+			}
 			// 内容拦截（11128 等）：这是**内容终态**，不轮转、不罚号、不自动改写提示词。
 			//   - 不轮转：同一 body 换任何账号都撞同一审核；
 			//   - 不罚号：账号余额/session 健康，问题在请求内容（见 applyErrorPolicy 分支）；
@@ -1235,6 +1269,7 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 				// 整个会话钉在它身上，后续每轮都失败。
 				kind := upstream.FrameKind(errFrame)
 				h.applyErrorPolicy(acct.UID, kind, errFrame, bareModel, nil)
+				st.noteUpstreamError(kind.String(), upstream.BusinessCode(errFrame))
 				st.status = upstream.ErrorStatus(kind)
 				st.outcome = reqlog.OutcomeStreamError
 				log.Printf("WARN: [server] stream acct=%s model=%s: upstream error frame kind=%s payload=%s",
@@ -1330,6 +1365,7 @@ func (h *Handler) inference(w http.ResponseWriter, r *http.Request, kind protoco
 			var fe *upstream.FrameError
 			if errors.As(err, &fe) {
 				h.applyErrorPolicy(acct.UID, fe.Kind, fe.Payload, bareModel, nil)
+				st.noteUpstreamError(fe.Kind.String(), upstream.BusinessCode(fe.Payload))
 				out.JSON(w, fe.Status, upstream.ErrorResponse(fe.Kind, fe.Payload))
 				st.status = fe.Status
 			} else {
@@ -1694,6 +1730,12 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 	case upstream.ErrContentBlocked:
 		// 内容策略拦截（误报）：内容问题非账号问题，不罚账号（无冷却/熔断/NoteError）。
 		// passthrough 模式由 chatCompletions 内降级重试处理；custom 模式本不会到此分支。
+	case upstream.ErrModelQueued:
+		// 模型容量队列（6020/6021/6022 或 HTTP 202）：上游在排队，与账号健康完全
+		// 无关——零动作（不冷却/不熔断/不 NoteError，同 ErrContentBlocked 待遇）。
+		// 也**不轮转**（同 kind 在末端直接终止轮转）：6020/6021 是模型全局容量，
+		// 换号不缩队；6022 虽然账号维度，但换号会白耗一个健康号额头并丢掉会话
+		// 缓存，交给客户端按 Retry-After 重试更诚实（客户端自己决定要不要换模型）。
 	case upstream.ErrPromptTooLong:
 		// 11115「prompt is too long」：请求的问题不是账号的问题（同一 body 换任何
 		// 号都超限）。零动作（不冷却/不熔断/不 NoteError，同 ErrContentBlocked 待遇），

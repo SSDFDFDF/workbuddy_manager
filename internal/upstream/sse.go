@@ -760,6 +760,15 @@ func errorFrame(obj map[string]any, payload, event string) *FrameError {
 	_, has := obj["error"]
 	code, codePresent := obj["code"]
 	business := codePresent && code != nil && fmt.Sprint(code) != "0"
+	// bizCode：官方桌面端在终帧用 bizCode 报业务码（capacity-queue 读的就是它，
+	// 见 5.6.2 客户端 readCapacityQueueErrorFromTerminal）。不认它 → 队列帧被当成
+	// 普通帧透传，客户端拿到一段无法解析的 fragment。仍以 code 为主：两者都出现时
+	// 取 code，避免重复判定。
+	if !business {
+		if biz, ok := obj["bizCode"]; ok && biz != nil && fmt.Sprint(biz) != "0" {
+			code, business = biz, true
+		}
+	}
 	if !has && !business && event != "error" {
 		return nil
 	}
@@ -771,7 +780,8 @@ func errorFrame(obj map[string]any, payload, event string) *FrameError {
 }
 func ErrorStatus(k ErrKind) int {
 	switch k {
-	case ErrSoftRate:
+	case ErrSoftRate, ErrModelQueued:
+		// 排队是**可重试**语义：429 + Retry-After（上游明示则用之）。
 		return 429
 	case ErrBadParams, ErrClient, ErrImageInvalid, ErrPromptTooLong, ErrContentBlocked, ErrModelBlocked:
 		return 400
