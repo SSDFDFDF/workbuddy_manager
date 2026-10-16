@@ -8,6 +8,7 @@ import { State, Dots, Empty, Tag } from '../components/ui';
 import { btnPrimary, btnGhost, btnXs, btnXsPrimary } from '../components/buttons';
 import { qrSVG, qrMatrix } from '../qr';
 import { copyText } from '../clipboard';
+import { ago } from '../fmt';
 
 interface Group {
   uid: string;
@@ -390,6 +391,10 @@ export function TasksCenterView() {
   const [configItem, setConfigItem] = useState<TaskActionItem | null>(null);
   const [filterType, setFilterType] = useState<'all' | 'unconfigured' | 'builtin' | 'custom' | 'disabled'>('all');
   const [searchKw, setSearchKw] = useState('');
+  /* 手动拉取上游活动：同步中 / 本次新发现的码（高亮）/ 最近一次拉取时刻 */
+  const [syncing, setSyncing] = useState(false);
+  const [newCodes, setNewCodes] = useState<string[]>([]);
+  const [syncedAt, setSyncedAt] = useState('');
 
   const stopPoll = () => {
     if (timerRef.current) {
@@ -441,12 +446,60 @@ export function TasksCenterView() {
   const loadActions = async () => {
     setActionsLoading(true);
     try {
-      const d = await api<{ actions: TaskActionItem[] }>('tasks/actions');
+      const d = await api<{ actions: TaskActionItem[]; synced_at?: string }>('tasks/actions');
       setActionsList(d.actions || []);
+      if (d.synced_at) setSyncedAt(d.synced_at);
     } catch (e) {
       toast('拉取活动列表失败：' + (e as Error).message, 'err');
     } finally {
       setActionsLoading(false);
+    }
+  };
+
+  /* 手动拉取上游活动目录（只读）：让上游新下发的活动不必先跑一遍待办扫描
+     也能出现在配置页；本次新发现的码在表格里高亮。 */
+  const syncActivities = async () => {
+    setSyncing(true);
+    try {
+      const r = await api<{
+        accounts: number;
+        pulled: number;
+        total: number;
+        new: number;
+        new_codes?: string[];
+        errors?: { uid: string; nickname?: string; error: string }[];
+        synced_at?: string;
+      }>('tasks/sync_activities', { method: 'POST' });
+      // 只有拉到东西才更新目录状态：失败不该抹掉上次成功拉取的“上次拉取/新发现”。
+      if (r.pulled > 0) {
+        setNewCodes(r.new_codes || []);
+        if (r.synced_at) setSyncedAt(r.synced_at);
+      }
+      await loadActions();
+      const errs = r.errors || [];
+      if (!r.accounts) {
+        toast('没有可拉取的账号：global / 企业版账号没有 CN 成长任务体系', 'err');
+        return;
+      }
+      if (!r.pulled) {
+        const e = errs[0];
+        toast('拉取失败：' + (e ? `${e.nickname || e.uid.slice(0, 8)}（${e.error}）` : '上游无响应'), 'err');
+        return;
+      }
+      if (r.new > 0) {
+        setFilterType('unconfigured'); // 直接跳到新发现，省一次过滤点击
+        setSearchKw(''); // 同时清掉搜索词：新发现被搜索词挡住就白跳了
+      }
+      toast(
+        `已拉取 ${r.pulled}/${r.accounts} 个账号：上游共 ${r.total} 项活动` +
+          (r.new ? `，新发现 ${r.new} 项` : '，无新活动') +
+          (errs.length ? `；${errs.length} 个账号失败` : ''),
+        'ok',
+      );
+    } catch (e) {
+      toast('拉取上游活动失败：' + (e as Error).message, 'err');
+    } finally {
+      setSyncing(false);
     }
   };
 
@@ -609,7 +662,9 @@ export function TasksCenterView() {
             </div>
             <span className="flex-1" />
             <span className="text-[12px] text-[var(--ink-3)]">
-              {tab === 'queue' ? summary : `共 ${(actionsList || []).length} 项活动`}
+              {tab === 'queue'
+                ? summary
+                : `共 ${(actionsList || []).length} 项活动` + (syncedAt ? ` · 上次拉取 ${ago(syncedAt)}` : ' · 未手动拉取过')}
             </span>
           </header>
 
@@ -729,6 +784,14 @@ export function TasksCenterView() {
                     value={searchKw}
                     onChange={(e) => setSearchKw(e.target.value)}
                   />
+                  <button
+                    className={btnXsPrimary}
+                    disabled={syncing}
+                    title="按账号拉取上游成长任务清单（默认 + 小程序口径）并入活动目录；只读，不执行任何任务"
+                    onClick={() => void syncActivities()}
+                  >
+                    {syncing ? '拉取中…' : '拉取上游活动'}
+                  </button>
                   <button className={btnXs} onClick={() => void loadActions()}>
                     刷新
                   </button>
@@ -741,7 +804,10 @@ export function TasksCenterView() {
                 </div>
               ) : !filteredActions.length ? (
                 <div className="py-12 text-center text-[var(--ink-3)]">
-                  没有找到符合条件的活动
+                  <div>没有找到符合条件的活动</div>
+                  {filterType === 'unconfigured' && (
+                    <div className="mt-1 text-[12px]">点上方「拉取上游活动」可从上游同步最新活动目录（无需先扫描待办）</div>
+                  )}
                 </div>
               ) : (
                 <div className="overflow-x-auto rounded-lg border border-[var(--line-soft)]">
@@ -758,10 +824,19 @@ export function TasksCenterView() {
                     </thead>
                     <tbody className="divide-y divide-[var(--line-soft)]/50">
                       {filteredActions.map((act) => {
+                        const isNew = newCodes.includes(act.code);
                         return (
-                          <tr key={act.code} className="transition-colors hover:bg-[var(--surface-2)]/40">
+                          <tr
+                            key={act.code}
+                            className={
+                              'transition-colors hover:bg-[var(--surface-2)]/40' + (isNew ? ' bg-[var(--ok-soft)]/25' : '')
+                            }
+                          >
                             <td className="px-3.5 py-2.5">
-                              <div className="font-medium text-[var(--ink)]">{act.title || act.code}</div>
+                              <div className="flex items-center gap-1.5">
+                                <span className="font-medium text-[var(--ink)]">{act.title || act.code}</span>
+                                {isNew && <Tag tone="ok">新发现</Tag>}
+                              </div>
                               <div className="font-[family-name:var(--mono)] text-[11px] text-[var(--ink-3)]">
                                 {act.code}
                               </div>
@@ -834,7 +909,11 @@ export function TasksCenterView() {
         <TaskConfigDialog
           item={configItem}
           onClose={() => setConfigItem(null)}
-          onSaved={() => void loadActions()}
+          onSaved={() => {
+            // 刚配置过的码不再是「新发现」（若它本在本次高亮列表里）
+            setNewCodes((codes) => codes.filter((c) => c !== configItem.code));
+            void loadActions();
+          }}
         />
       )}
     </div>

@@ -120,6 +120,11 @@ type Panel struct {
 	// knownTasks 运行时发现并记录的上游成长任务元数据（全量目录与标题展示）
 	knownTasksMu sync.RWMutex
 	knownTasks   map[string]upstream.Task
+
+	// activitiesPulledAt 最近一次「手动拉取上游活动」成功时刻（零值 = 从未拉取）。
+	// 目录此前只在扫描/执行时被动补全，此时间戳让配置页能判断目录新鲜度。
+	activitiesPulledMu sync.Mutex
+	activitiesPulledAt time.Time
 }
 
 // recordKnownTasks 记录上游返回的任务元数据（扫描/查询时自动并入）。
@@ -292,6 +297,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto_all", p.withAuth(p.accountTaskAutoAll))
 	p.mux.HandleFunc("POST /panel/api/tasks/scan_all", p.withAuth(p.tasksScanAll))
 	p.mux.HandleFunc("GET /panel/api/tasks/actions", p.withAuth(p.tasksActions))
+	p.mux.HandleFunc("POST /panel/api/tasks/sync_activities", p.withAuth(p.tasksSyncActivities))
 	p.mux.HandleFunc("POST /panel/api/tasks/policy", p.withAuth(p.tasksSavePolicy))
 	p.mux.HandleFunc("POST /panel/api/tasks/run_queue", p.withAuth(p.tasksRunQueue))
 	p.mux.HandleFunc("GET /panel/api/tasks/queue", p.withAuth(p.tasksQueueStatus))

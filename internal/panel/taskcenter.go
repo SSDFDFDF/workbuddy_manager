@@ -611,7 +611,7 @@ func (p *Panel) tasksActions(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"ok":      true,
 		"actions": out,
 		"policy": map[string]any{
@@ -619,6 +619,167 @@ func (p *Panel) tasksActions(w http.ResponseWriter, r *http.Request) {
 			"allow_unknown_claim": pol.AllowUnknownClaim,
 			"mp_override":         pol.MPOverride,
 		},
+	}
+	// 上次手动拉取时刻（零值不输出）：配置页据此展示目录新鲜度。
+	if at := p.lastActivitiesPull(); !at.IsZero() {
+		body["synced_at"] = at.Format(time.RFC3339)
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+// ---------------------------------------------------------------------------
+// 手动拉取上游活动目录
+// ---------------------------------------------------------------------------
+
+// noteActivitiesPulledAt 记录一次成功的手动拉取时刻。
+func (p *Panel) noteActivitiesPulledAt(at time.Time) {
+	p.activitiesPulledMu.Lock()
+	p.activitiesPulledAt = at
+	p.activitiesPulledMu.Unlock()
+}
+
+// lastActivitiesPull 最近一次手动拉取时刻（零值 = 从未拉取）。
+func (p *Panel) lastActivitiesPull() time.Time {
+	p.activitiesPulledMu.Lock()
+	defer p.activitiesPulledMu.Unlock()
+	return p.activitiesPulledAt
+}
+
+// activitySyncErr 手动拉取时单账号的失败项（不阻塞其他账号）。
+type activitySyncErr struct {
+	UID      string `json:"uid"`
+	Nickname string `json:"nickname,omitempty"`
+	Error    string `json:"error"`
+}
+
+// tasksSyncActivities 手动拉取上游任务活动目录（面板「拉取上游活动」按钮）：
+// 并发按账号拉取成长任务列表（默认 + 小程序口径）并入 knownTasks 全景目录，
+// 让上游新下发的活动无需先跑一遍待办扫描就出现在「活动自动化配置」页。
+//
+// 与 tasksScanAll 的分工：扫描按「未完成且可自动化」过滤（回答“现在该做什么”），
+// 本接口不做进度/状态过滤（回答“上游一共下发了哪些活动”），并顺带刷新 mp 专属码
+// 探测。只读幂等：不 accept、不执行动作；单账号失败只记录（默认与 mp 口径都失败
+// 才计入 errors，mp 单侧失败静默——与 pendingGrowthTasks 同口径，避免无 mp 任务的
+// 部署刷错误）。
+//
+// 返回的「新发现」= 目录此前没有、且既非内置动作、也未被显式配置的码——与配置页
+// 「未配置新活动」过滤（前端会据此自动切过去）保持同一口径；不自动启用任何自动化。
+func (p *Panel) tasksSyncActivities(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.Pool == nil || p.cfg.Upstream == nil {
+		writeErr(w, http.StatusNotImplemented, "account pool or upstream not available")
+		return
+	}
+
+	// 拉取前的已知目录快照：用于判定本次「新发现」。
+	before := map[string]bool{}
+	p.knownTasksMu.RLock()
+	for code := range p.knownTasks {
+		before[code] = true
+	}
+	p.knownTasksMu.RUnlock()
+	pol := p.autotaskPolicy() // 「新发现」过滤用的策略快照（配置过的码不该再报新）
+
+	type syncAccount struct {
+		a    *auth.Auth
+		nick string
+	}
+	var accts []syncAccount
+	for _, st := range p.cfg.Pool.List() {
+		if st.Disabled {
+			continue
+		}
+		a := p.cfg.Pool.AuthByUID(st.UID)
+		if a == nil {
+			continue
+		}
+		// 门控同扫描：global 账号无 CN 成长体系，企业版上游 403
+		//（growth system is only available for personal users），均不发上游调用。
+		if a.IsGlobal() || a.IsEnterprise() {
+			continue
+		}
+		accts = append(accts, syncAccount{a: a, nick: a.NicknameValue()})
+	}
+
+	var (
+		wg     sync.WaitGroup
+		mu     sync.Mutex
+		sem    = make(chan struct{}, 3) // 与 packages/vouchers 同款限流
+		pulled int
+		errs   = []activitySyncErr{} // 恒输出 []（不是 null），前端免判空
+		union  = map[string]upstream.Task{}
+	)
+	for _, it := range accts {
+		wg.Add(1)
+		go func(it syncAccount) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			def, defErr := p.cfg.Upstream.ListTasks(it.a)
+			mp, mpErr := p.cfg.Upstream.ListTasksMP(it.a)
+			if defErr != nil && mpErr != nil {
+				mu.Lock()
+				errs = append(errs, activitySyncErr{UID: it.a.UID, Nickname: it.nick, Error: defErr.Error()})
+				mu.Unlock()
+				return
+			}
+			// 双口径都成功才记录差集（单侧失败会把全部任务误判成 mp 专属）。
+			if defErr == nil && mpErr == nil {
+				p.noteMPDetected(mpExclusiveCodes(def, mp))
+			}
+			p.recordKnownTasks(def)
+			p.recordKnownTasks(mp)
+			mu.Lock()
+			pulled++
+			for _, list := range [][]upstream.Task{def, mp} {
+				for _, t := range list {
+					if t.TaskCode == "" {
+						continue
+					}
+					// mp 列表是默认口径的超集：已有条目只在标题为空时被覆盖，
+					// 避免两侧标题/描述不同导致每次拉取结果抖动。
+					if prev, ok := union[t.TaskCode]; !ok || prev.Title == "" {
+						union[t.TaskCode] = t
+					}
+				}
+			}
+			mu.Unlock()
+		}(it)
+	}
+	wg.Wait()
+
+	// 「新发现」= 本次上游下发但此前目录没有、且非内置动作（内置动作恒在配置页）、
+	// 也未被显式配置（已配置的码在配置页本就有行，不算新发现——该判定必须与
+	// 配置页的「未配置新活动」过滤同口径，否则前端切过去后可能看不到这些码）。
+	newCodes := make([]string, 0)
+	for code := range union {
+		if before[code] || autoActionByCode(code) != nil {
+			continue
+		}
+		if _, configured := pol.Tasks[code]; configured {
+			continue
+		}
+		newCodes = append(newCodes, code)
+	}
+	sort.Strings(newCodes)
+	sort.Slice(errs, func(i, j int) bool { return errs[i].UID < errs[j].UID })
+
+	syncedAt := ""
+	if pulled > 0 {
+		at := time.Now()
+		p.noteActivitiesPulledAt(at)
+		syncedAt = at.Format(time.RFC3339)
+	}
+	log.Printf("panel: 拉取上游活动：账号 %d/%d，活动 %d 项，新发现 %d 项，失败 %d 个",
+		pulled, len(accts), len(union), len(newCodes), len(errs))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":        true,
+		"accounts":  len(accts),
+		"pulled":    pulled,
+		"total":     len(union),
+		"new":       len(newCodes),
+		"new_codes": newCodes,
+		"errors":    errs,
+		"synced_at": syncedAt,
 	})
 }
 
